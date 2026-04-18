@@ -278,6 +278,119 @@ function cleanResponse(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Post-run issue status reconciliation
+// ---------------------------------------------------------------------------
+
+/**
+ * Ensure a successfully-completed run leaves the issue in a terminal status.
+ *
+ * This adapter delegates `status=done` to the LLM via a curl in the prompt
+ * template. That is by design — the LLM controls pacing and can legitimately
+ * choose `blocked` or `cancelled` based on its findings — but it creates a
+ * race with Paperclip's periodic `reconcileStrandedAssignedIssues` watchdog:
+ * if the LLM forgets (or emits) the curl late, Paperclip sees the run marked
+ * `succeeded` while the issue is still `in_progress`, and the reconciler's
+ * `in_progress` branch (lacking the skip-on-succeeded guard that its `todo`
+ * twin has) re-dispatches a recovery run on an already-completed issue.
+ * Wasted model calls, and after a few retries Paperclip's execution policy
+ * marks the issue `blocked`.
+ *
+ * Strategy:
+ *   1. Only run for successful Hermes exits (exit 0, no timeout, no parsed
+ *      error). Failed runs are correctly left for Paperclip's own recovery
+ *      path.
+ *   2. Only touch issues the agent claims it acted on (taskId present).
+ *   3. GET the current status. If it is already in a terminal state
+ *      (`done`, `blocked`, `cancelled`), respect the LLM's intent.
+ *   4. If still `todo` or `in_progress`, PATCH to `done`. We log the drift
+ *      so operators can spot agents whose prompt-following is weak.
+ *
+ * Fully best-effort: any exception here is swallowed so a reconciliation
+ * failure cannot fail an otherwise-successful run.
+ */
+async function ensureTerminalStatus(args: {
+  paperclipApiUrl: string;
+  paperclipApiKey: string | undefined;
+  taskId: string;
+  runSucceeded: boolean;
+  log: (stream: "stdout" | "stderr", line: string) => Promise<void> | void;
+}): Promise<void> {
+  const { paperclipApiUrl, paperclipApiKey, taskId, runSucceeded, log } = args;
+
+  if (!runSucceeded || !taskId || !paperclipApiKey) return;
+
+  const base = paperclipApiUrl.replace(/\/+$/, "");
+  const getUrl = `${base}/issues/${encodeURIComponent(taskId)}`;
+  const authHeader = `Bearer ${paperclipApiKey}`;
+
+  let currentStatus: string | undefined;
+  try {
+    const res = await fetch(getUrl, {
+      method: "GET",
+      headers: { Authorization: authHeader },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      await log(
+        "stdout",
+        `[hermes] post-run status check: GET ${getUrl} -> ${res.status} ${res.statusText}; skipping reconciliation\n`,
+      );
+      return;
+    }
+    const body = (await res.json()) as { status?: string };
+    currentStatus = typeof body?.status === "string" ? body.status : undefined;
+  } catch (err) {
+    await log(
+      "stdout",
+      `[hermes] post-run status check failed: ${(err as Error)?.message ?? err}; skipping reconciliation\n`,
+    );
+    return;
+  }
+
+  if (!currentStatus) return;
+
+  const terminal = new Set(["done", "blocked", "cancelled"]);
+  if (terminal.has(currentStatus)) {
+    return;
+  }
+
+  if (currentStatus !== "todo" && currentStatus !== "in_progress") {
+    return;
+  }
+
+  await log(
+    "stdout",
+    `[hermes] post-run reconciliation: run succeeded but issue still '${currentStatus}'; ` +
+      `patching to 'done' to close the reconciler race window\n`,
+  );
+
+  try {
+    const res = await fetch(getUrl, {
+      method: "PATCH",
+      headers: {
+        Authorization: authHeader,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status: "done" }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      await log(
+        "stderr",
+        `[hermes] post-run PATCH failed: ${res.status} ${res.statusText}\n`,
+      );
+      return;
+    }
+    await log("stdout", `[hermes] post-run reconciliation: patched ${taskId} -> done\n`);
+  } catch (err) {
+    await log(
+      "stderr",
+      `[hermes] post-run PATCH failed: ${(err as Error)?.message ?? err}\n`,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Output parsing
 // ---------------------------------------------------------------------------
 
@@ -562,6 +675,36 @@ export async function execute(
   if (persistSession && parsed.sessionId) {
     executionResult.sessionParams = { sessionId: parsed.sessionId };
     executionResult.sessionDisplayId = parsed.sessionId.slice(0, 16);
+  }
+
+  // ── Post-run reconciliation ────────────────────────────────────────────
+  // Close the race window between run-succeeded and issue-status-done. See
+  // the `ensureTerminalStatus` docstring for the full rationale. We call
+  // this BEFORE returning so Paperclip marks the run succeeded only after
+  // the issue is guaranteed to be in a terminal status, preventing the
+  // upstream stranded-issue reconciler from misfiring.
+  const runSucceeded =
+    result.exitCode === 0 &&
+    !result.timedOut &&
+    !parsed.errorMessage;
+  if (runSucceeded && taskId) {
+    // Prefer the prompt-building URL (ending in /api) so we target the
+    // same base both LLM curl calls and the reconciliation call hit.
+    let paperclipApiUrl =
+      cfgString(config.paperclipApiUrl) ||
+      process.env.PAPERCLIP_API_URL ||
+      "http://127.0.0.1:3100/api";
+    if (!paperclipApiUrl.endsWith("/api")) {
+      paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
+    }
+    await ensureTerminalStatus({
+      paperclipApiUrl,
+      paperclipApiKey:
+        env.PAPERCLIP_API_KEY || (ctx as any).authToken || undefined,
+      taskId,
+      runSucceeded,
+      log: ctx.onLog,
+    });
   }
 
   return executionResult;
