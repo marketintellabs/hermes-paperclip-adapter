@@ -31,15 +31,33 @@ The MIL-specific changes live on the `mil` branch. Keep these minimal and
 surgical so rebases stay tractable:
 
 1. **Package rename + version**: `package.json` publishes as
-   `@marketintellabs/hermes-paperclip-adapter` with a `0.3.x-mil.N` version suffix.
-2. **MIL builtin prompt template**: `templates/mil-heartbeat.md` shipped with
-   the package, plus a small loader in `src/server/execute.ts` that recognizes
-   `promptTemplate: "builtin:mil-heartbeat"`.
+   `@marketintellabs/hermes-paperclip-adapter` with a `0.x.y-mil.N` version suffix.
+2. **MIL builtin prompt templates**: `templates/mil-heartbeat.md` (legacy —
+   LLM-driven status transitions) and `templates/mil-heartbeat-v2.md`
+   (0.4.0+ — adapter-owned status transitions) shipped with the package,
+   plus a small loader in `src/server/execute.ts` that recognizes
+   `promptTemplate: "builtin:<name>"`.
 3. **OpenRouter model-prefix hints**: entries added to
    `MODEL_PREFIX_PROVIDER_HINTS` in `src/shared/constants.ts` so agents using
    OpenRouter-style model IDs (`anthropic/...`, `x-ai/...`, `openai/...`,
    `zai-org/...`) route to `provider: "openrouter"` automatically.
-4. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+4. **Adapter-owned status transitions** (0.4.0-mil.0+): when the resolved
+   `promptTemplate` is in `ADAPTER_OWNED_STATUS_TEMPLATES` (currently
+   `mil-heartbeat-v2`), `execute.ts` PATCHes the issue to `in_progress`
+   before spawning Hermes and transitions it to the terminal status the
+   LLM signalled via a `RESULT:` marker in its final message (`done` /
+   `blocked` / `cancelled`). The adapter also posts a structured
+   completion comment. See [`src/server/result-marker.ts`](./src/server/result-marker.ts)
+   and [`docs/ADAPTER_REDESIGN.md`](https://github.com/marketintellabs/marketintellabs/blob/main/docs/ADAPTER_REDESIGN.md)
+   in the MarketIntelLabs infra repo for the design rationale.
+   Legacy templates keep the pre-0.4.0 behaviour (LLM PATCHes status
+   itself) with the 0.3.2-mil.0 safety-net reconciler still active.
+5. **Post-run safety-net reconciler** (0.3.2-mil.0): for legacy templates
+   only, after a successful Hermes exit the adapter GETs the issue and
+   PATCHes it to `done` if it is still `todo`/`in_progress`. Closes a
+   race with upstream Paperclip's `reconcileStrandedAssignedIssues`
+   watchdog.
+6. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
    tag push.
 
 Everything else is expected to stay in lockstep with upstream.

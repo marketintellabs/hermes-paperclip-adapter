@@ -17,5 +17,8 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - name: Verify template is shipped
-        run: test -f templates/mil-heartbeat.md
+      - run: npm test
+      - name: Verify templates are shipped
+        run: |
+          test -f templates/mil-heartbeat.md
+          test -f templates/mil-heartbeat-v2.md

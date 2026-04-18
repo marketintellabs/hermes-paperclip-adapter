@@ -43,12 +43,20 @@ import {
   VALID_PROVIDERS,
   BUILTIN_PROMPT_TEMPLATES,
   BUILTIN_PROMPT_TEMPLATE_PREFIX,
+  ADAPTER_OWNED_STATUS_TEMPLATES,
 } from "../shared/constants.js";
 
 import {
   detectModel,
   resolveProvider,
 } from "./detect-model.js";
+
+import {
+  parseResultMarker,
+  stripResultMarker,
+  type ResultMarker,
+  type RunOutcome,
+} from "./result-marker.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -129,19 +137,33 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
+interface ResolvedTemplate {
+  /** Rendered template text (with {{var}} placeholders unresolved). */
+  text: string;
+  /**
+   * Builtin template name (e.g. `"mil-heartbeat-v2"`) if the caller
+   * resolved via `builtin:<name>`; `null` otherwise. Used downstream to
+   * decide whether to activate adapter-owned status transitions.
+   */
+  builtinName: string | null;
+}
+
 /**
  * Resolve `adapterConfig.promptTemplate`:
- *   - `undefined` / empty  → DEFAULT_PROMPT_TEMPLATE
+ *   - `undefined` / empty  → DEFAULT_PROMPT_TEMPLATE (builtinName=null)
  *   - `"builtin:<name>"`   → load `templates/<name>.md` shipped with this package
  *   - any other string     → use as-is (with {{var}} placeholders)
  *
  * Added by the MarketIntelLabs fork so operators can reference a vetted
  * template by name instead of shipping a giant string in every agent's
- * adapterConfig.
+ * adapterConfig. The returned `builtinName` lets downstream code enable
+ * per-template behaviours such as adapter-owned status transitions.
  */
-function resolvePromptTemplate(raw: string | undefined): string {
-  if (!raw) return DEFAULT_PROMPT_TEMPLATE;
-  if (!raw.startsWith(BUILTIN_PROMPT_TEMPLATE_PREFIX)) return raw;
+function resolvePromptTemplate(raw: string | undefined): ResolvedTemplate {
+  if (!raw) return { text: DEFAULT_PROMPT_TEMPLATE, builtinName: null };
+  if (!raw.startsWith(BUILTIN_PROMPT_TEMPLATE_PREFIX)) {
+    return { text: raw, builtinName: null };
+  }
 
   const name = raw.slice(BUILTIN_PROMPT_TEMPLATE_PREFIX.length);
   if (!(BUILTIN_PROMPT_TEMPLATES as readonly string[]).includes(name)) {
@@ -155,14 +177,25 @@ function resolvePromptTemplate(raw: string | undefined): string {
   // From dist/server/execute.js that's three levels up.
   const here = dirname(fileURLToPath(import.meta.url));
   const templatePath = join(here, "..", "..", "templates", `${name}.md`);
-  return readFileSync(templatePath, "utf-8");
+  return { text: readFileSync(templatePath, "utf-8"), builtinName: name };
+}
+
+interface BuiltPrompt {
+  text: string;
+  /**
+   * Builtin template name that produced this prompt, or `null` for
+   * caller-supplied raw templates. Downstream code uses this to gate
+   * adapter-owned status transitions.
+   */
+  builtinName: string | null;
 }
 
 function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
-): string {
-  const template = resolvePromptTemplate(cfgString(config.promptTemplate));
+): BuiltPrompt {
+  const resolved = resolvePromptTemplate(cfgString(config.promptTemplate));
+  const template = resolved.text;
 
   const taskId = cfgString(ctx.config?.taskId);
   const taskTitle = cfgString(ctx.config?.taskTitle) || "";
@@ -220,7 +253,10 @@ function buildPrompt(
   );
 
   // Replace remaining {{variable}} placeholders
-  return renderTemplate(rendered, vars);
+  return {
+    text: renderTemplate(rendered, vars),
+    builtinName: resolved.builtinName,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -278,114 +314,349 @@ function cleanResponse(raw: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Post-run issue status reconciliation
+// Paperclip API client (minimal, best-effort)
 // ---------------------------------------------------------------------------
 
-/**
- * Ensure a successfully-completed run leaves the issue in a terminal status.
- *
- * This adapter delegates `status=done` to the LLM via a curl in the prompt
- * template. That is by design — the LLM controls pacing and can legitimately
- * choose `blocked` or `cancelled` based on its findings — but it creates a
- * race with Paperclip's periodic `reconcileStrandedAssignedIssues` watchdog:
- * if the LLM forgets (or emits) the curl late, Paperclip sees the run marked
- * `succeeded` while the issue is still `in_progress`, and the reconciler's
- * `in_progress` branch (lacking the skip-on-succeeded guard that its `todo`
- * twin has) re-dispatches a recovery run on an already-completed issue.
- * Wasted model calls, and after a few retries Paperclip's execution policy
- * marks the issue `blocked`.
- *
- * Strategy:
- *   1. Only run for successful Hermes exits (exit 0, no timeout, no parsed
- *      error). Failed runs are correctly left for Paperclip's own recovery
- *      path.
- *   2. Only touch issues the agent claims it acted on (taskId present).
- *   3. GET the current status. If it is already in a terminal state
- *      (`done`, `blocked`, `cancelled`), respect the LLM's intent.
- *   4. If still `todo` or `in_progress`, PATCH to `done`. We log the drift
- *      so operators can spot agents whose prompt-following is weak.
- *
- * Fully best-effort: any exception here is swallowed so a reconciliation
- * failure cannot fail an otherwise-successful run.
- */
-async function ensureTerminalStatus(args: {
-  paperclipApiUrl: string;
-  paperclipApiKey: string | undefined;
-  taskId: string;
-  runSucceeded: boolean;
-  log: (stream: "stdout" | "stderr", line: string) => Promise<void> | void;
-}): Promise<void> {
-  const { paperclipApiUrl, paperclipApiKey, taskId, runSucceeded, log } = args;
+type LogFn = (stream: "stdout" | "stderr", line: string) => Promise<void> | void;
 
-  if (!runSucceeded || !taskId || !paperclipApiKey) return;
+interface PaperclipApiClient {
+  /** Base URL with guaranteed `/api` suffix. */
+  base: string;
+  /** Bearer token (may be undefined — caller should skip writes in that case). */
+  apiKey: string | undefined;
+  log: LogFn;
+}
 
-  const base = paperclipApiUrl.replace(/\/+$/, "");
-  const getUrl = `${base}/issues/${encodeURIComponent(taskId)}`;
-  const authHeader = `Bearer ${paperclipApiKey}`;
+function buildPaperclipClient(
+  ctx: AdapterExecutionContext,
+  config: Record<string, unknown>,
+  env: Record<string, string>,
+): PaperclipApiClient {
+  let base =
+    cfgString(config.paperclipApiUrl) ||
+    env.PAPERCLIP_API_URL ||
+    process.env.PAPERCLIP_API_URL ||
+    "http://127.0.0.1:3100/api";
+  if (!base.endsWith("/api")) {
+    base = base.replace(/\/+$/, "") + "/api";
+  }
+  const apiKey =
+    env.PAPERCLIP_API_KEY || (ctx as any).authToken || undefined;
+  return { base, apiKey, log: ctx.onLog };
+}
 
-  let currentStatus: string | undefined;
+async function getIssueStatus(
+  client: PaperclipApiClient,
+  issueId: string,
+): Promise<string | undefined> {
+  if (!client.apiKey) return undefined;
+  const url = `${client.base}/issues/${encodeURIComponent(issueId)}`;
   try {
-    const res = await fetch(getUrl, {
+    const res = await fetch(url, {
       method: "GET",
-      headers: { Authorization: authHeader },
+      headers: { Authorization: `Bearer ${client.apiKey}` },
       signal: AbortSignal.timeout(10_000),
     });
     if (!res.ok) {
-      await log(
+      await client.log(
         "stdout",
-        `[hermes] post-run status check: GET ${getUrl} -> ${res.status} ${res.statusText}; skipping reconciliation\n`,
+        `[hermes] GET ${url} -> ${res.status} ${res.statusText}\n`,
       );
-      return;
+      return undefined;
     }
     const body = (await res.json()) as { status?: string };
-    currentStatus = typeof body?.status === "string" ? body.status : undefined;
+    return typeof body?.status === "string" ? body.status : undefined;
   } catch (err) {
-    await log(
+    await client.log(
       "stdout",
-      `[hermes] post-run status check failed: ${(err as Error)?.message ?? err}; skipping reconciliation\n`,
+      `[hermes] GET ${url} failed: ${(err as Error)?.message ?? err}\n`,
+    );
+    return undefined;
+  }
+}
+
+async function patchIssueStatus(
+  client: PaperclipApiClient,
+  issueId: string,
+  status: "in_progress" | "done" | "blocked" | "cancelled",
+): Promise<boolean> {
+  if (!client.apiKey) return false;
+  const url = `${client.base}/issues/${encodeURIComponent(issueId)}`;
+  try {
+    const res = await fetch(url, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${client.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      await client.log(
+        "stderr",
+        `[hermes] PATCH ${url} status=${status} -> ${res.status} ${res.statusText}\n`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    await client.log(
+      "stderr",
+      `[hermes] PATCH ${url} status=${status} failed: ${(err as Error)?.message ?? err}\n`,
+    );
+    return false;
+  }
+}
+
+async function postIssueComment(
+  client: PaperclipApiClient,
+  issueId: string,
+  body: string,
+): Promise<boolean> {
+  if (!client.apiKey || !body.trim()) return false;
+  const url = `${client.base}/issues/${encodeURIComponent(issueId)}/comments`;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${client.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ body }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) {
+      await client.log(
+        "stderr",
+        `[hermes] POST ${url} -> ${res.status} ${res.statusText}\n`,
+      );
+      return false;
+    }
+    return true;
+  } catch (err) {
+    await client.log(
+      "stderr",
+      `[hermes] POST ${url} failed: ${(err as Error)?.message ?? err}\n`,
+    );
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Pre-run claim
+// ---------------------------------------------------------------------------
+
+/**
+ * For adapter-owned-status templates, ensure the issue is `in_progress`
+ * before we hand control to Hermes. The LLM no longer needs to emit a
+ * `status=in_progress` curl from its prompt, which keeps the template
+ * small and prevents a whole class of "LLM forgot to claim" bugs.
+ *
+ * Behaviour:
+ *   - If the issue is `todo` or `backlog`, PATCH to `in_progress`.
+ *   - If it is already `in_progress`, no-op (Paperclip or a prior
+ *     heartbeat claimed it for us).
+ *   - If it is terminal (`done`/`blocked`/`cancelled`), log a warning
+ *     and leave the status alone. This should not normally happen but
+ *     protects against Paperclip dispatching stale work.
+ *
+ * All errors are swallowed — a failed pre-run claim is not a reason to
+ * abort the whole run. Paperclip's reconciler will notice and retry.
+ */
+async function preRunClaim(
+  client: PaperclipApiClient,
+  taskId: string,
+): Promise<void> {
+  const current = await getIssueStatus(client, taskId);
+  if (!current) return;
+
+  if (current === "in_progress") {
+    await client.log(
+      "stdout",
+      `[hermes] pre-run claim: ${taskId} already 'in_progress', skipping PATCH\n`,
     );
     return;
   }
 
-  if (!currentStatus) return;
-
   const terminal = new Set(["done", "blocked", "cancelled"]);
-  if (terminal.has(currentStatus)) {
+  if (terminal.has(current)) {
+    await client.log(
+      "stderr",
+      `[hermes] pre-run claim: ${taskId} is already '${current}'; ` +
+        `Paperclip dispatched a run against a terminal issue — continuing but not changing status\n`,
+    );
     return;
   }
 
-  if (currentStatus !== "todo" && currentStatus !== "in_progress") {
+  if (current === "todo" || current === "backlog") {
+    const ok = await patchIssueStatus(client, taskId, "in_progress");
+    if (ok) {
+      await client.log(
+        "stdout",
+        `[hermes] pre-run claim: patched ${taskId} '${current}' -> 'in_progress'\n`,
+      );
+    }
     return;
   }
 
-  await log(
+  // Unknown status — log but don't touch.
+  await client.log(
     "stdout",
-    `[hermes] post-run reconciliation: run succeeded but issue still '${currentStatus}'; ` +
+    `[hermes] pre-run claim: ${taskId} has unexpected status '${current}'; leaving alone\n`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Post-run outcome reconciliation
+// ---------------------------------------------------------------------------
+
+/**
+ * For adapter-owned-status templates, transition the issue to a terminal
+ * status based on the LLM's `RESULT:` marker (see
+ * `./result-marker.ts`) and post a structured completion comment.
+ *
+ * This is the proper replacement for the 0.3.2-mil.0 `ensureTerminalStatus`
+ * safety-net: when the prompt template is adapter-owned, we are the
+ * canonical source of truth for status transitions, and the LLM should
+ * never be emitting `curl .../status=...` itself.
+ *
+ * Behaviour:
+ *   - Only activates on a successful Hermes exit (exit 0, no timeout,
+ *     no parsed error) with a `taskId` present. Failed runs are left
+ *     for Paperclip's execution-policy retry loop.
+ *   - Parses the RESULT marker from the assistant summary; defaults to
+ *     `done` if none is present (and logs a prompt-following warning).
+ *   - Respects terminal statuses already on the issue — the LLM may
+ *     have been mid-edit when we read; we don't clobber `blocked` with
+ *     `done`.
+ *   - PATCHes the issue to the marker's outcome and POSTs a completion
+ *     comment containing the stripped summary and, for non-`done`
+ *     outcomes, the LLM's stated reason.
+ *
+ * All API errors are logged but non-fatal.
+ */
+async function reconcileOutcome(args: {
+  client: PaperclipApiClient;
+  taskId: string;
+  agentName: string;
+  summary: string;
+  marker: ResultMarker | null;
+  markerPresent: boolean;
+}): Promise<RunOutcome> {
+  const { client, taskId, agentName, summary, marker, markerPresent } = args;
+
+  if (!markerPresent) {
+    await client.log(
+      "stdout",
+      `[hermes] post-run: no RESULT marker found in agent response; ` +
+        `defaulting to 'done'. Agents using 'builtin:mil-heartbeat-v2' should ` +
+        `end their final message with 'RESULT: done' / 'RESULT: blocked' / ` +
+        `'RESULT: cancelled' explicitly.\n`,
+    );
+  }
+
+  const outcome: RunOutcome = marker?.outcome ?? "done";
+
+  const current = await getIssueStatus(client, taskId);
+  const terminal = new Set(["done", "blocked", "cancelled"]);
+  if (current && terminal.has(current)) {
+    await client.log(
+      "stdout",
+      `[hermes] post-run: ${taskId} is already '${current}', not overriding ` +
+        `(LLM or prior run set it explicitly)\n`,
+    );
+    return outcome;
+  }
+
+  const ok = await patchIssueStatus(client, taskId, outcome);
+  if (ok) {
+    await client.log(
+      "stdout",
+      `[hermes] post-run: patched ${taskId} -> '${outcome}' (marker ${markerPresent ? "present" : "defaulted"})\n`,
+    );
+  }
+
+  const commentBody = buildCompletionCommentBody({
+    agentName,
+    outcome,
+    summary,
+    reason: marker?.reason,
+  });
+  if (commentBody) {
+    await postIssueComment(client, taskId, commentBody);
+  }
+
+  return outcome;
+}
+
+/**
+ * Build the structured completion comment the adapter posts after it
+ * transitions the issue to a terminal status. Format:
+ *
+ *   **<Agent Name>** completed via `hermes` adapter — `RESULT: done`
+ *
+ *   <stripped summary>
+ *
+ * For `blocked`/`cancelled` outcomes the LLM's `reason:` is surfaced on
+ * its own line so the issue reader sees the escalation rationale
+ * without reading the agent log.
+ */
+function buildCompletionCommentBody(args: {
+  agentName: string;
+  outcome: RunOutcome;
+  summary: string;
+  reason: string | undefined;
+}): string {
+  const { agentName, outcome, summary, reason } = args;
+  const lines: string[] = [];
+  lines.push(`**${agentName}** completed via \`hermes\` adapter — \`RESULT: ${outcome}\``);
+  if (reason && outcome !== "done") {
+    lines.push("");
+    lines.push(`Reason: ${reason}`);
+  }
+  const trimmedSummary = summary.trim();
+  if (trimmedSummary) {
+    lines.push("");
+    lines.push(trimmedSummary);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Pre-0.4.0 safety-net reconciler (the 0.3.2-mil.0 fix).
+ *
+ * Retained for agents using the legacy `mil-heartbeat` template (or
+ * any non-adapter-owned template) where the LLM is still expected to
+ * emit its own status curls. In those flows we only intervene when:
+ *
+ *   - the run succeeded (exit 0, no timeout, no error), and
+ *   - the issue is still `todo`/`in_progress` after the run.
+ *
+ * We then PATCH to `done` to close the reconciler race window.
+ * Terminal statuses (`done`/`blocked`/`cancelled`) are respected so the
+ * LLM can still intentionally escalate via its own curl.
+ */
+async function ensureTerminalStatusSafetyNet(
+  client: PaperclipApiClient,
+  taskId: string,
+): Promise<void> {
+  const current = await getIssueStatus(client, taskId);
+  if (!current) return;
+  const terminal = new Set(["done", "blocked", "cancelled"]);
+  if (terminal.has(current)) return;
+  if (current !== "todo" && current !== "in_progress") return;
+
+  await client.log(
+    "stdout",
+    `[hermes] post-run safety-net: run succeeded but issue still '${current}'; ` +
       `patching to 'done' to close the reconciler race window\n`,
   );
-
-  try {
-    const res = await fetch(getUrl, {
-      method: "PATCH",
-      headers: {
-        Authorization: authHeader,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ status: "done" }),
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) {
-      await log(
-        "stderr",
-        `[hermes] post-run PATCH failed: ${res.status} ${res.statusText}\n`,
-      );
-      return;
-    }
-    await log("stdout", `[hermes] post-run reconciliation: patched ${taskId} -> done\n`);
-  } catch (err) {
-    await log(
-      "stderr",
-      `[hermes] post-run PATCH failed: ${(err as Error)?.message ?? err}\n`,
+  const ok = await patchIssueStatus(client, taskId, "done");
+  if (ok) {
+    await client.log(
+      "stdout",
+      `[hermes] post-run safety-net: patched ${taskId} -> 'done'\n`,
     );
   }
 }
@@ -504,11 +775,14 @@ export async function execute(
 
   // ── Build prompt ───────────────────────────────────────────────────────
   const prompt = buildPrompt(ctx, config);
+  const adapterOwnedStatus =
+    prompt.builtinName !== null &&
+    ADAPTER_OWNED_STATUS_TEMPLATES.has(prompt.builtinName);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
   const useQuiet = cfgBoolean(config.quiet) !== false; // default true
-  const args: string[] = ["chat", "-q", prompt];
+  const args: string[] = ["chat", "-q", prompt.text];
   if (useQuiet) args.push("-Q");
 
   if (model) {
@@ -592,6 +866,40 @@ export async function execute(
       "stdout",
       `[hermes] Resuming session: ${prevSessionId}\n`,
     );
+  }
+  if (prompt.builtinName) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] Prompt template: builtin:${prompt.builtinName}` +
+        `${adapterOwnedStatus ? " (adapter-owned status)" : ""}\n`,
+    );
+  }
+
+  // Debug-log the shape of ctx.context so we can plan PR #3 (skills +
+  // blocker graph consumption) against real data. ctx.context is the
+  // adapter contract's structured issue metadata surface (separate from
+  // ctx.config); today we don't consume it, but seeing its keys on a
+  // real run lets us scope what's available without a staging detour.
+  // Values are not logged (may contain sensitive summaries).
+  if (ctx.context && typeof ctx.context === "object") {
+    const keys = Object.keys(ctx.context);
+    if (keys.length > 0) {
+      await ctx.onLog(
+        "stdout",
+        `[hermes] ctx.context keys: [${keys.join(", ")}]\n`,
+      );
+    }
+  }
+
+  // ── Build Paperclip API client (used for pre-run claim + post-run) ─────
+  const paperclipClient = buildPaperclipClient(ctx, config, env);
+
+  // ── Pre-run claim (adapter-owned-status templates only) ────────────────
+  // For legacy templates, the LLM still handles PATCH status=in_progress
+  // via curl from the prompt. Skipping keeps behaviour identical for
+  // agents still on builtin:mil-heartbeat.
+  if (adapterOwnedStatus && taskId && paperclipClient.apiKey) {
+    await preRunClaim(paperclipClient, taskId);
   }
 
   // ── Execute ────────────────────────────────────────────────────────────
@@ -678,33 +986,56 @@ export async function execute(
   }
 
   // ── Post-run reconciliation ────────────────────────────────────────────
-  // Close the race window between run-succeeded and issue-status-done. See
-  // the `ensureTerminalStatus` docstring for the full rationale. We call
-  // this BEFORE returning so Paperclip marks the run succeeded only after
-  // the issue is guaranteed to be in a terminal status, preventing the
-  // upstream stranded-issue reconciler from misfiring.
+  // Two modes:
+  //   1. adapter-owned-status template (builtin:mil-heartbeat-v2+): the
+  //      LLM is instructed NOT to PATCH status itself. We parse the
+  //      `RESULT:` marker from its final message and transition the
+  //      issue ourselves, then post a structured completion comment.
+  //      Defaults to 'done' if the marker is missing.
+  //   2. Legacy template (builtin:mil-heartbeat, or caller-supplied):
+  //      the LLM is still expected to emit status=done via curl. We
+  //      just run the 0.3.2-mil.0 safety-net (patch done if still
+  //      in_progress) to close the reconciler race window.
+  //
+  // Both paths only activate on a successful run with a taskId.
   const runSucceeded =
     result.exitCode === 0 &&
     !result.timedOut &&
     !parsed.errorMessage;
-  if (runSucceeded && taskId) {
-    // Prefer the prompt-building URL (ending in /api) so we target the
-    // same base both LLM curl calls and the reconciliation call hit.
-    let paperclipApiUrl =
-      cfgString(config.paperclipApiUrl) ||
-      process.env.PAPERCLIP_API_URL ||
-      "http://127.0.0.1:3100/api";
-    if (!paperclipApiUrl.endsWith("/api")) {
-      paperclipApiUrl = paperclipApiUrl.replace(/\/+$/, "") + "/api";
+
+  if (runSucceeded && taskId && paperclipClient.apiKey) {
+    if (adapterOwnedStatus) {
+      const marker = parseResultMarker(parsed.response);
+      const summary = parsed.response
+        ? stripResultMarker(parsed.response).slice(0, 2000)
+        : "";
+
+      const finalOutcome = await reconcileOutcome({
+        client: paperclipClient,
+        taskId,
+        agentName: ctx.agent?.name || "Hermes Agent",
+        summary,
+        marker,
+        markerPresent: marker !== null,
+      });
+
+      // Reflect the parsed marker in the summary Paperclip stores on
+      // the run record so UI/API consumers can see the agent's intent
+      // without re-parsing the transcript.
+      if (summary) {
+        executionResult.summary = summary;
+      }
+      if (executionResult.resultJson && typeof executionResult.resultJson === "object") {
+        (executionResult.resultJson as Record<string, unknown>).outcome = finalOutcome;
+        (executionResult.resultJson as Record<string, unknown>).marker_present =
+          marker !== null;
+        if (marker?.reason) {
+          (executionResult.resultJson as Record<string, unknown>).outcome_reason = marker.reason;
+        }
+      }
+    } else {
+      await ensureTerminalStatusSafetyNet(paperclipClient, taskId);
     }
-    await ensureTerminalStatus({
-      paperclipApiUrl,
-      paperclipApiKey:
-        env.PAPERCLIP_API_KEY || (ctx as any).authToken || undefined,
-      taskId,
-      runSucceeded,
-      log: ctx.onLog,
-    });
   }
 
   return executionResult;
