@@ -31,12 +31,18 @@ import {
   ensureAbsoluteDirectory,
 } from "@paperclipai/adapter-utils/server-utils";
 
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   HERMES_CLI,
   DEFAULT_TIMEOUT_SEC,
   DEFAULT_GRACE_SEC,
   DEFAULT_MODEL,
   VALID_PROVIDERS,
+  BUILTIN_PROMPT_TEMPLATES,
+  BUILTIN_PROMPT_TEMPLATE_PREFIX,
 } from "../shared/constants.js";
 
 import {
@@ -123,11 +129,40 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
+/**
+ * Resolve `adapterConfig.promptTemplate`:
+ *   - `undefined` / empty  → DEFAULT_PROMPT_TEMPLATE
+ *   - `"builtin:<name>"`   → load `templates/<name>.md` shipped with this package
+ *   - any other string     → use as-is (with {{var}} placeholders)
+ *
+ * Added by the MarketIntelLabs fork so operators can reference a vetted
+ * template by name instead of shipping a giant string in every agent's
+ * adapterConfig.
+ */
+function resolvePromptTemplate(raw: string | undefined): string {
+  if (!raw) return DEFAULT_PROMPT_TEMPLATE;
+  if (!raw.startsWith(BUILTIN_PROMPT_TEMPLATE_PREFIX)) return raw;
+
+  const name = raw.slice(BUILTIN_PROMPT_TEMPLATE_PREFIX.length);
+  if (!(BUILTIN_PROMPT_TEMPLATES as readonly string[]).includes(name)) {
+    throw new Error(
+      `Unknown builtin promptTemplate "${raw}". ` +
+        `Available: ${BUILTIN_PROMPT_TEMPLATES.map((n) => BUILTIN_PROMPT_TEMPLATE_PREFIX + n).join(", ")}`,
+    );
+  }
+
+  // Templates live at <package-root>/templates/<name>.md.
+  // From dist/server/execute.js that's three levels up.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const templatePath = join(here, "..", "..", "templates", `${name}.md`);
+  return readFileSync(templatePath, "utf-8");
+}
+
 function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
 ): string {
-  const template = cfgString(config.promptTemplate) || DEFAULT_PROMPT_TEMPLATE;
+  const template = resolvePromptTemplate(cfgString(config.promptTemplate));
 
   const taskId = cfgString(ctx.config?.taskId);
   const taskTitle = cfgString(ctx.config?.taskTitle) || "";

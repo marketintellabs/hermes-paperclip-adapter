@@ -78,7 +78,30 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
   ["mistral", "auto"],
   // HuggingFace models (org/model format)
   ["huggingface/", "huggingface"],
+  // ── MarketIntelLabs fork additions ─────────────────────────────────────
+  // OpenRouter model-ID conventions: when the model is given in the
+  // `<org>/<model>` form that OpenRouter uses, route through OpenRouter
+  // directly. Keep these BELOW the single-vendor hints above so explicit
+  // anthropic/openai/z.ai detection still wins for non-OpenRouter setups.
+  ["anthropic/", "openrouter"],
+  ["openai/", "openrouter"],
+  ["x-ai/", "openrouter"],
+  ["zai-org/", "openrouter"],
+  ["google/", "openrouter"],
+  ["meta-llama/", "openrouter"],
+  ["deepseek/", "openrouter"],
+  ["mistralai/", "openrouter"],
+  ["qwen/", "openrouter"],
 ];
+
+/**
+ * Builtin prompt template identifiers (MarketIntelLabs fork).
+ * Consumers can set `adapterConfig.promptTemplate = "builtin:<name>"`
+ * to use a template shipped with the package instead of embedding a
+ * giant string in their adapter config.
+ */
+export const BUILTIN_PROMPT_TEMPLATES = ["mil-heartbeat"] as const;
+export const BUILTIN_PROMPT_TEMPLATE_PREFIX = "builtin:";
 
 /** Regex to extract session ID from Hermes CLI output. */
 export const SESSION_ID_REGEX = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
