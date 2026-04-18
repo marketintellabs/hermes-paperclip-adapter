@@ -1,4 +1,14 @@
-# Paperclip Adapter for Hermes Agent
+# @marketintellabs/hermes-paperclip-adapter
+
+> **Fork notice** — This is a [MarketIntelLabs](https://marketintellabs.com)
+> fork of the upstream
+> [`hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter)
+> by Nous Research, published to npm as
+> [`@marketintellabs/hermes-paperclip-adapter`](https://www.npmjs.com/package/@marketintellabs/hermes-paperclip-adapter).
+> See [`UPSTREAM.md`](./UPSTREAM.md) for the rationale, fork point, and sync
+> policy. Divergence from upstream is intentionally minimal — a shipped
+> `builtin:mil-heartbeat` prompt template, OpenRouter model-prefix hints, and a
+> release workflow tied to our production deploys.
 
 A [Paperclip](https://paperclip.ing) adapter that lets you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a managed employee in a Paperclip company.
 

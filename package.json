@@ -1,13 +1,20 @@
 {
-  "name": "hermes-paperclip-adapter",
-  "version": "0.3.0",
-  "description": "Paperclip adapter for Hermes Agent — run Hermes as a managed employee in a Paperclip company",
+  "name": "@marketintellabs/hermes-paperclip-adapter",
+  "version": "0.3.1-mil.0",
+  "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with a published 0.3.1+ release, MIL heartbeat prompt template, and OpenRouter model-prefix hints",
   "type": "module",
   "license": "MIT",
-  "author": "Nous Research",
+  "author": "MarketIntelLabs Inc. (fork of NousResearch/hermes-paperclip-adapter)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/NousResearch/hermes-paperclip-adapter"
+    "url": "https://github.com/marketintellabs/hermes-paperclip-adapter"
+  },
+  "bugs": {
+    "url": "https://github.com/marketintellabs/hermes-paperclip-adapter/issues"
+  },
+  "homepage": "https://github.com/marketintellabs/hermes-paperclip-adapter#readme",
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "paperclip",
@@ -15,7 +22,8 @@
     "hermes-agent",
     "ai-agent",
     "adapter",
-    "orchestration"
+    "orchestration",
+    "marketintellabs"
   ],
   "exports": {
     ".": "./dist/index.js",
@@ -24,7 +32,11 @@
     "./cli": "./dist/cli/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "templates",
+    "README.md",
+    "UPSTREAM.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",
