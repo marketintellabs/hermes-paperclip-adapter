@@ -100,8 +100,38 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
  * to use a template shipped with the package instead of embedding a
  * giant string in their adapter config.
  */
-export const BUILTIN_PROMPT_TEMPLATES = ["mil-heartbeat"] as const;
+/**
+ * Known builtin template names.
+ *
+ *   `mil-heartbeat`     — legacy template (pre-0.4.0). Status transitions
+ *                         are delegated to the LLM via curl. Kept for
+ *                         backcompat with agents that have not yet been
+ *                         re-configured.
+ *   `mil-heartbeat-v2`  — new template (0.4.0+). Status transitions are
+ *                         handled by the adapter; the LLM signals outcome
+ *                         via a `RESULT:` marker at the end of its final
+ *                         message. See `src/server/result-marker.ts`.
+ */
+export const BUILTIN_PROMPT_TEMPLATES = ["mil-heartbeat", "mil-heartbeat-v2"] as const;
 export const BUILTIN_PROMPT_TEMPLATE_PREFIX = "builtin:";
+
+/**
+ * Template names that opt into adapter-owned status transitions.
+ *
+ * When the resolved promptTemplate is one of these, the adapter will:
+ *   - PATCH the issue to `in_progress` before spawning Hermes (if it
+ *     isn't already).
+ *   - Parse the RESULT marker from Hermes output after a successful run.
+ *   - PATCH the issue to the marker's outcome (`done` / `blocked` /
+ *     `cancelled`) and POST a structured completion comment.
+ *
+ * Templates not in this set retain the pre-0.4.0 behaviour: the adapter
+ * only runs a safety-net reconciliation if a successful run left the
+ * issue in `todo`/`in_progress` (the 0.3.2-mil.0 fix).
+ */
+export const ADAPTER_OWNED_STATUS_TEMPLATES = new Set<string>([
+  "mil-heartbeat-v2",
+]);
 
 /** Regex to extract session ID from Hermes CLI output. */
 export const SESSION_ID_REGEX = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;

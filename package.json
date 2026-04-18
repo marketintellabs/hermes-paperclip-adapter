@@ -1,7 +1,7 @@
 {
   "name": "@marketintellabs/hermes-paperclip-adapter",
-  "version": "0.3.2-mil.0",
-  "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with a published 0.3.1+ release, MIL heartbeat prompt template, and OpenRouter model-prefix hints",
+  "version": "0.4.0-mil.0",
+  "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with adapter-owned status transitions, published 0.3.1+ release, MIL heartbeat prompt templates, and OpenRouter model-prefix hints",
   "type": "module",
   "license": "MIT",
   "author": "MarketIntelLabs Inc. (fork of NousResearch/hermes-paperclip-adapter)",
@@ -43,6 +43,7 @@
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test dist/**/*.test.js",
     "clean": "rm -rf dist",
     "prepare": "tsc"
   },
