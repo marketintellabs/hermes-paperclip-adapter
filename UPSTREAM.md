@@ -84,7 +84,32 @@ surgical so rebases stay tractable:
    PATCHes it to `done` if it is still `todo`/`in_progress`. Closes a
    race with upstream Paperclip's `reconcileStrandedAssignedIssues`
    watchdog.
-8. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+8. **In-process MCP tool server + per-run `HERMES_HOME`** (0.7.0-mil.0):
+   ships `paperclip-mcp` (stdio MCP server built on
+   `@modelcontextprotocol/sdk@^1.29` and `zod@^4`) as a bin entry and a
+   new `templates/mil-heartbeat-v3.md` that strips every curl example
+   and mandates tool use. Four tools: `list_my_issues`, `get_issue`,
+   `post_issue_comment`, `create_sub_issue`. Hardening baked in:
+   `PAPERCLIP_ISSUE_ID`-based scope enforcement on writes (reads open),
+   `MAX_TOOL_CALLS=20` cap, HTTP-status `retryPolicy` classifier,
+   structured per-call `[paperclip-mcp-log]` logs on stderr.
+   `execute.ts` gates on a new `MCP_TOOL_TEMPLATES` set (kept separate
+   from `ADAPTER_OWNED_STATUS_TEMPLATES` so future templates can opt
+   into either independently). When active, it builds a per-run
+   `/tmp/paperclip-run-<runId>-XXXXXX/` HERMES_HOME that symlinks
+   `sessions`/`skills`/`.env` from the real home (preserving session
+   resume + skill discovery) but writes a fresh `config.yaml` carrying
+   this run's `mcp_servers.paperclip` block with the JWT + scope env.
+   Cleanup runs in `finally`. Implementation in `src/mcp/` and
+   `src/server/hermes-home.ts`; test coverage: 46 tests across 11
+   suites. Rationale: runs are scope-distinct and multiple agents
+   share a department container, so a shared `~/.hermes/config.yaml`
+   would race — per-run `HERMES_HOME` is the clean isolation model.
+   Also bumps Node `engines` to `>=24` to match the Node 24 LTS image,
+   TypeScript to `^6.0.0`, and adds `yaml@^2.8` for the config
+   generator. See [`docs/ADAPTER_REDESIGN.md`](https://github.com/marketintellabs/marketintellabs/blob/main/docs/ADAPTER_REDESIGN.md)
+   (in the MIL infra repo) §"Phase B" for the full design record.
+9. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
    tag push.
 
 Everything else is expected to stay in lockstep with upstream.
