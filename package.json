@@ -1,6 +1,6 @@
 {
   "name": "@marketintellabs/hermes-paperclip-adapter",
-  "version": "0.4.1-mil.0",
+  "version": "0.4.2-mil.0",
   "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with adapter-owned status transitions, published 0.3.1+ release, MIL heartbeat prompt templates, and OpenRouter model-prefix hints",
   "type": "module",
   "license": "MIT",
