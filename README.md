@@ -51,12 +51,30 @@ agents were running on v3:
   `update_issue_status` tool over the `RESULT:` marker (marker retained
   as a structured fallback).
 
-**0.8.1-mil.0 — env propagation fix:** Hermes doesn't forward the
-`mcp_servers.paperclip.env` block from the per-run `config.yaml` to its
-stdio subprocess (only selected names like `PAPERCLIP_ISSUE_ID` are
-passed in). `execute.ts` now also propagates `PAPERCLIP_MCP_AUDIT_LOG`
-and `PAPERCLIP_MCP_LIVENESS_FILE` via direct process-env inheritance,
-so the NDJSON and liveness files actually get written.
+**0.8.1-mil.0 — env propagation fix (superseded by 0.8.3 note below):**
+first attempt at restoring tool-call telemetry by setting
+`PAPERCLIP_MCP_AUDIT_LOG` and `PAPERCLIP_MCP_LIVENESS_FILE` on the
+adapter's own `env` block. That doesn't actually reach the MCP
+subprocess — Hermes' `_build_safe_env` strips parent env down to a
+small allowlist (`PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`,
+`SHELL`, `TMPDIR`, `XDG_*`) before merging `mcp_servers.<name>.env`.
+The write is a no-op; 0.8.3 removes it and leans solely on the
+config.yaml path (which `hermes-home.ts` has always populated).
+
+**0.8.3-mil.0 — resume guard + config diagnostic:** two small defenses
+on top of 0.8.2. (1) Before passing `--resume <id>` to `hermes chat`
+we now re-run `isPlausibleSessionId` on the stored `sessionParams.sessionId`
+via a new `resolveResumeSessionId` helper. If some other store (a
+Hermes SQLite state file, a paperclip cache we missed during the
+MAR-30 cleanup) still holds a poisoned value, we log the rejection and
+let the run create a fresh session instead of inheriting a crash loop.
+(2) After writing the per-run `config.yaml`, the adapter reads it
+back and logs `audit=<bool> liveness=<bool>` so a single line of
+`stdout_excerpt` now tells you whether the telemetry env block made
+it into the file on disk — the only way we have to tell config.yaml
+issues from Hermes-side env filtering issues without ECS Exec. The
+belt-and-suspenders process-env write from 0.8.1 is removed (it never
+worked — see the 0.8.1 note above).
 
 **0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
 `--resume <id>` names an unknown session it prints
@@ -77,7 +95,7 @@ Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
 back. The 0.8.x hardening only kicks in on v3 runs. See the
 [fork divergence list](./UPSTREAM.md#divergence-from-upstream)
-(items 8–11) for the implementation sketch.
+(items 8–12) for the implementation sketch.
 
 ## MIL-specific features
 
@@ -379,7 +397,7 @@ git clone https://github.com/marketintellabs/hermes-paperclip-adapter
 cd hermes-paperclip-adapter
 npm install
 npm run build
-npm test       # 101 tests across 23 suites
+npm test       # 107 tests across 24 suites
 ```
 
 See [`AGENTS.md`](./AGENTS.md) for the source tree layout and

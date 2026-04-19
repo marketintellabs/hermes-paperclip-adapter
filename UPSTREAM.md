@@ -157,7 +157,23 @@ surgical so rebases stay tractable:
     run"`. Nine new tests in `parse-hermes-output.test.ts` pin the
     regression. Incident reference: MAR-30 Marcus heartbeat crash
     loop, 2026-04-19.
-12. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+12. **Resume guard + config.yaml diagnostic** (0.8.3-mil.0): two small
+    follow-ups to 0.8.2. (a) `resolveResumeSessionId` runs
+    `isPlausibleSessionId` on the stored `sessionParams.sessionId`
+    before it becomes `hermes chat --resume <id>`; if some OTHER
+    store (Hermes SQLite state, paperclip cache) still holds a
+    poisoned value we drop it, log a warning, and create a fresh
+    session. (b) After writing the per-run `config.yaml` the adapter
+    reads it back and logs `audit=<bool> liveness=<bool>` so
+    `stdout_excerpt` alone reveals whether the telemetry env block
+    made it onto disk — needed because Hermes' `_build_safe_env`
+    (`tools/mcp_tool.py`) intentionally filters parent env down to
+    a small allowlist, so the process-env write from 0.8.1 was a
+    no-op. 0.8.1's belt-and-suspenders lines are removed, with a
+    comment explaining why, to keep future maintainers from
+    re-adding them. Six new tests in `parse-hermes-output.test.ts`
+    cover `resolveResumeSessionId`.
+13. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
     tag push.
 
 Everything else is expected to stay in lockstep with upstream.

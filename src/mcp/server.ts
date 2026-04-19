@@ -6,7 +6,7 @@ import { ALL_TOOLS } from "./tools/index.js";
 import { ScopeViolation, type ToolContext } from "./tools/types.js";
 
 const SERVER_NAME = "paperclip";
-const SERVER_VERSION = "0.8.2-mil.0";
+const SERVER_VERSION = "0.8.3-mil.0";
 
 /**
  * Hard cap on tool calls per run, enforced inside the MCP server

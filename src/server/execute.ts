@@ -32,6 +32,7 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 
 import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -392,6 +393,34 @@ export function isPlausibleSessionId(id: string | null | undefined): boolean {
   // Require either a digit, a hyphen, or an underscore.
   if (!/[0-9_-]/.test(id)) return false;
   return true;
+}
+
+/**
+ * Decide whether a stored `prevSessionId` is safe to pass to
+ * `hermes chat --resume <id>`. Returns the validated id (or "") plus a
+ * flag indicating whether we actively rejected a non-empty input.
+ *
+ * Rationale ("from"-poisoning loop):
+ *
+ * A non-existent or malformed session id makes Hermes exit with
+ * `Session not found: <id>` on stderr. Before 0.8.2, our legacy
+ * session-id regex could re-capture the `<id>` fragment from that very
+ * error and persist it as the run's `session_id_after`, which then
+ * became the next run's `session_id_before` — an infinite crash loop
+ * affecting thousands of heartbeat runs. 0.8.2 tightened the regex and
+ * added `isPlausibleSessionId`; this guard is the second line of
+ * defense: even if some OTHER store (a Hermes SQLite state file, a
+ * paperclip cache we missed) still holds a poisoned value, we refuse
+ * to pass it to `--resume` and let the run create a fresh session.
+ *
+ * Exported for unit tests.
+ */
+export function resolveResumeSessionId(
+  raw: string | null | undefined,
+): { sessionId: string; rejected: boolean } {
+  if (!raw) return { sessionId: "", rejected: false };
+  if (isPlausibleSessionId(raw)) return { sessionId: raw, rejected: false };
+  return { sessionId: "", rejected: true };
 }
 
 /** Regex to extract token usage from Hermes output. */
@@ -983,12 +1012,22 @@ export async function execute(
   // system is designed for human-attended interactive sessions.
   args.push("--yolo");
 
-  // Session resume
-  const prevSessionId = cfgString(
+  // Session resume. See resolveResumeSessionId for the shape check and
+  // the "from"-poisoning-loop rationale.
+  const prevSessionIdRaw = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
-  if (persistSession && prevSessionId) {
-    args.push("--resume", prevSessionId);
+  const resume = resolveResumeSessionId(prevSessionIdRaw);
+  if (persistSession && resume.rejected) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] rejecting implausible prevSessionId=${JSON.stringify(
+        prevSessionIdRaw,
+      )} (shape check failed) — will create a fresh session\n`,
+    );
+  }
+  if (persistSession && resume.sessionId) {
+    args.push("--resume", resume.sessionId);
   }
 
   if (extraArgs?.length) {
@@ -1028,10 +1067,10 @@ export async function execute(
     "stdout",
     `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
-  if (prevSessionId) {
+  if (resume.sessionId) {
     await ctx.onLog(
       "stdout",
-      `[hermes] Resuming session: ${prevSessionId}\n`,
+      `[hermes] Resuming session: ${resume.sessionId}\n`,
     );
   }
   if (prompt.builtinName) {
@@ -1142,21 +1181,39 @@ export async function execute(
       runId: ctx.runId ?? null,
     });
     env.HERMES_HOME = perRunHome.path;
-    // Belt-and-suspenders: propagate telemetry paths via process env too, not
-    // just through config.yaml's `mcp_servers.paperclip.env`. Hermes passes
-    // parent env to its MCP subprocesses via normal inheritance, but we've
-    // observed it does NOT forward the per-server `env` block from
-    // config.yaml (only e.g. PAPERCLIP_ISSUE_ID that paperclip itself sets on
-    // the adapter process). Without this, the MCP server starts with
-    // PAPERCLIP_MCP_AUDIT_LOG undefined and the NDJSON file is never written
-    // → execute.ts sees an empty audit and resultJson.toolCalls stays empty.
-    env.PAPERCLIP_MCP_AUDIT_LOG = perRunHome.auditLogPath;
-    env.PAPERCLIP_MCP_LIVENESS_FILE = perRunHome.livenessFilePath;
+    // Note: setting telemetry vars on the adapter's own env does NOT help —
+    // Hermes' `_build_safe_env` (tools/mcp_tool.py) intentionally filters
+    // parent env down to a baseline allowlist (PATH/HOME/USER/LANG/TERM/…
+    // plus XDG_*) and only merges the explicit `mcp_servers.<name>.env`
+    // block from config.yaml on top. So the ONLY way PAPERCLIP_MCP_AUDIT_LOG
+    // reaches the MCP subprocess is via hermes-home.ts baking it into the
+    // per-run config.yaml (which it does). Keeping this comment so the
+    // next person doesn't re-add the belt-and-suspenders env assignment.
     await ctx.onLog(
       "stdout",
       `[hermes] MCP tool server enabled; HERMES_HOME=${perRunHome.path} ` +
         `(scope: agent=${ctx.agent?.id || "?"} issue=${taskId || "none"})\n`,
     );
+    // Diagnostic: surface the presence of telemetry keys in the per-run
+    // config.yaml so we can tell at a glance whether the env block got
+    // built correctly. Values are NOT logged (they are filesystem paths
+    // with the runId, but we treat config.yaml as write-only + 0600).
+    try {
+      const perRunYaml = await readFile(join(perRunHome.path, "config.yaml"), "utf-8");
+      const paperclipBlock = perRunYaml.match(/\n\s{2}paperclip:\n[\s\S]*?(?=\n\S|$)/);
+      const hasAudit = /PAPERCLIP_MCP_AUDIT_LOG:\s*\S/.test(paperclipBlock?.[0] ?? "");
+      const hasLiveness = /PAPERCLIP_MCP_LIVENESS_FILE:\s*\S/.test(paperclipBlock?.[0] ?? "");
+      await ctx.onLog(
+        "stdout",
+        `[hermes] per-run config.yaml env: audit=${hasAudit} liveness=${hasLiveness} ` +
+          `(bytes=${perRunYaml.length})\n`,
+      );
+    } catch (err) {
+      await ctx.onLog(
+        "stdout",
+        `[hermes] per-run config.yaml read failed: ${(err as Error).message}\n`,
+      );
+    }
   }
 
   let result;

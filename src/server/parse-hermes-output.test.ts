@@ -15,7 +15,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { parseHermesOutput, isPlausibleSessionId } from "./execute.js";
+import { parseHermesOutput, isPlausibleSessionId, resolveResumeSessionId } from "./execute.js";
 
 describe("parseHermesOutput error detection", () => {
   it("ignores benign 'error' / 'failed' mentions in stderr", () => {
@@ -167,5 +167,45 @@ describe("isPlausibleSessionId", () => {
   it("accepts alnum ids with digits", () => {
     assert.equal(isPlausibleSessionId("abc123xy"), true);
     assert.equal(isPlausibleSessionId("run_2026_04"), true);
+  });
+});
+
+describe("resolveResumeSessionId (0.8.3 resume guard)", () => {
+  it("returns empty + rejected=false for null/empty", () => {
+    assert.deepEqual(resolveResumeSessionId(null), { sessionId: "", rejected: false });
+    assert.deepEqual(resolveResumeSessionId(undefined), { sessionId: "", rejected: false });
+    assert.deepEqual(resolveResumeSessionId(""), { sessionId: "", rejected: false });
+  });
+
+  it("passes through a plausible uuid-style session id", () => {
+    const uuid = "20260419_211331_fc5725";
+    assert.deepEqual(resolveResumeSessionId(uuid), { sessionId: uuid, rejected: false });
+  });
+
+  it("passes through a plausible UUID", () => {
+    const uuid = "5c6e0e1b-9f47-4d6e-8a5c-a5a9b6a8d1f7";
+    assert.deepEqual(resolveResumeSessionId(uuid), { sessionId: uuid, rejected: false });
+  });
+
+  it("rejects the legacy 'from'-poisoning token", () => {
+    // This is the exact value ~3800 heartbeat_runs were poisoned with
+    // before the 0.8.2 regex fix. If it ever reappears in session_params,
+    // the guard must strip it so Hermes creates a fresh session.
+    assert.deepEqual(resolveResumeSessionId("from"), { sessionId: "", rejected: true });
+  });
+
+  it("rejects other short english words and fragments", () => {
+    for (const w of ["session", "notfound", "error", "none", "abc"]) {
+      const r = resolveResumeSessionId(w);
+      assert.equal(r.sessionId, "", `should strip ${w}`);
+      assert.equal(r.rejected, true, `should flag ${w} as rejected`);
+    }
+  });
+
+  it("rejects pure-alpha ids that pass length but have no digit/dash/underscore", () => {
+    assert.deepEqual(resolveResumeSessionId("abcdefghij"), {
+      sessionId: "",
+      rejected: true,
+    });
   });
 });
