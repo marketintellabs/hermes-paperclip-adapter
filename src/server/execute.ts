@@ -276,7 +276,7 @@ const TOKEN_USAGE_REGEX =
 /** Regex to extract cost from Hermes output. */
 const COST_REGEX = /(?:cost|spent)[:\s]*\$?([\d.]+)/i;
 
-interface ParsedOutput {
+export interface ParsedOutput {
   sessionId?: string;
   response?: string;
   usage?: UsageSummary;
@@ -665,7 +665,7 @@ async function ensureTerminalStatusSafetyNet(
 // Output parsing
 // ---------------------------------------------------------------------------
 
-function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
+export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   const combined = stdout + "\n" + stderr;
   const result: ParsedOutput = {};
 
@@ -710,12 +710,27 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
     result.costUsd = parseFloat(costMatch[1]);
   }
 
-  // Check for error patterns in stderr
+  // Capture real error signatures from stderr for diagnostics.
+  //
+  // IMPORTANT: This field is informational only. It must NOT gate whether
+  // the adapter treats the run as successful — that is the exit code's job.
+  // Hermes (and its underlying tools: MCP, camoufox, Playwright, etc.) emit
+  // a lot of benign stderr output that contains the words "error" / "failed"
+  // in perfectly successful runs (e.g. "retrying after error", "No error
+  // detected", "failed to resolve optional dependency"). Treating those as
+  // failure signals previously caused adapter-owned status reconciliation to
+  // silently skip on successful runs (MAR-27, 2026-04-19).
+  //
+  // We match only strong failure signatures: lines that START with a known
+  // error prefix, plus Python tracebacks and unhandled-rejection markers.
   if (stderr.trim()) {
+    const STRONG_ERROR_PREFIX =
+      /^(?:error|fatal|unhandled exception|unhandledrejection|panic|traceback \(most recent call last\))[:\s]/i;
     const errorLines = stderr
       .split("\n")
-      .filter((line) => /error|exception|traceback|failed/i.test(line))
-      .filter((line) => !/INFO|DEBUG|warn/i.test(line)); // skip log-level noise
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && STRONG_ERROR_PREFIX.test(line))
+      .filter((line) => !/INFO|DEBUG|warn/i.test(line));
     if (errorLines.length > 0) {
       result.errorMessage = errorLines.slice(0, 5).join("\n");
     }
@@ -966,14 +981,21 @@ export async function execute(
     executionResult.costUsd = parsed.costUsd;
   }
 
-  // Summary from agent response
-  if (parsed.response) {
-    executionResult.summary = parsed.response.slice(0, 2000);
+  // Summary from agent response.
+  //
+  // Always strip any `RESULT:` marker before exposing the response to
+  // Paperclip's auto-comment / UI, otherwise the marker leaks into the
+  // issue thread even when adapter-owned status reconciliation later
+  // decides (correctly) not to post a structured completion comment.
+  // stripResultMarker is a no-op when the marker is absent.
+  const cleanedResponse = parsed.response ? stripResultMarker(parsed.response) : "";
+  if (cleanedResponse) {
+    executionResult.summary = cleanedResponse.slice(0, 2000);
   }
 
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
   executionResult.resultJson = {
-    result: parsed.response || "",
+    result: cleanedResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
@@ -998,17 +1020,19 @@ export async function execute(
   //      in_progress) to close the reconciler race window.
   //
   // Both paths only activate on a successful run with a taskId.
-  const runSucceeded =
-    result.exitCode === 0 &&
-    !result.timedOut &&
-    !parsed.errorMessage;
+  //
+  // `runSucceeded` intentionally trusts ONLY the process exit code and
+  // timeout flag. `parsed.errorMessage` is diagnostic noise — Hermes and
+  // its subprocess MCP tools emit benign "error"/"failed" keywords on
+  // successful runs (MAR-27 regression), and letting that flip this guard
+  // silently skipped reconcileOutcome and caused the issue to be marked
+  // `blocked` by Paperclip's continuation retry.
+  const runSucceeded = result.exitCode === 0 && !result.timedOut;
 
   if (runSucceeded && taskId && paperclipClient.apiKey) {
     if (adapterOwnedStatus) {
       const marker = parseResultMarker(parsed.response);
-      const summary = parsed.response
-        ? stripResultMarker(parsed.response).slice(0, 2000)
-        : "";
+      const summary = cleanedResponse.slice(0, 2000);
 
       const finalOutcome = await reconcileOutcome({
         client: paperclipClient,
