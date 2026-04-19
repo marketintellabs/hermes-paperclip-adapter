@@ -1,7 +1,7 @@
 {
   "name": "@marketintellabs/hermes-paperclip-adapter",
-  "version": "0.4.2-mil.0",
-  "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with adapter-owned status transitions, published 0.3.1+ release, MIL heartbeat prompt templates, and OpenRouter model-prefix hints",
+  "version": "0.7.0-mil.0",
+  "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with adapter-owned status transitions, an in-process MCP tool server (paperclip-mcp) that replaces curl-in-prompt with structured tool calls, MIL heartbeat prompt templates, and OpenRouter model-prefix hints",
   "type": "module",
   "license": "MIT",
   "author": "MarketIntelLabs Inc. (fork of NousResearch/hermes-paperclip-adapter)",
@@ -23,13 +23,19 @@
     "ai-agent",
     "adapter",
     "orchestration",
+    "mcp",
+    "model-context-protocol",
     "marketintellabs"
   ],
   "exports": {
     ".": "./dist/index.js",
     "./server": "./dist/server/index.js",
     "./ui": "./dist/ui/index.js",
-    "./cli": "./dist/cli/index.js"
+    "./cli": "./dist/cli/index.js",
+    "./mcp": "./dist/mcp/server.js"
+  },
+  "bin": {
+    "paperclip-mcp": "dist/mcp/cli.js"
   },
   "files": [
     "dist",
@@ -39,23 +45,26 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/mcp/cli.js",
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test dist/**/*.test.js",
     "clean": "rm -rf dist",
-    "prepare": "tsc"
+    "prepare": "tsc && chmod +x dist/mcp/cli.js 2>/dev/null || true"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@paperclipai/adapter-utils": "^2026.325.0",
-    "picocolors": "^1.1.0"
+    "picocolors": "^1.1.0",
+    "yaml": "^2.8.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
-    "typescript": "^5.7.0"
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=24.0.0"
   }
 }

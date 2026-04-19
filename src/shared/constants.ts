@@ -107,12 +107,24 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
  *                         are delegated to the LLM via curl. Kept for
  *                         backcompat with agents that have not yet been
  *                         re-configured.
- *   `mil-heartbeat-v2`  — new template (0.4.0+). Status transitions are
- *                         handled by the adapter; the LLM signals outcome
- *                         via a `RESULT:` marker at the end of its final
- *                         message. See `src/server/result-marker.ts`.
+ *   `mil-heartbeat-v2`  — adapter-owned status template (0.4.0+). Status
+ *                         transitions are handled by the adapter; the LLM
+ *                         signals outcome via a `RESULT:` marker at the
+ *                         end of its final message. See
+ *                         `src/server/result-marker.ts`. Still instructs
+ *                         the LLM to interact with Paperclip via curl.
+ *   `mil-heartbeat-v3`  — MCP-tool template (0.7.0+). Same adapter-owned
+ *                         status semantics as v2, but strips all curl /
+ *                         API-reference instructions and mandates the
+ *                         LLM use the in-process `paperclip-mcp` tool
+ *                         server instead. See `templates/mil-heartbeat-v3.md`
+ *                         and `src/mcp/`.
  */
-export const BUILTIN_PROMPT_TEMPLATES = ["mil-heartbeat", "mil-heartbeat-v2"] as const;
+export const BUILTIN_PROMPT_TEMPLATES = [
+  "mil-heartbeat",
+  "mil-heartbeat-v2",
+  "mil-heartbeat-v3",
+] as const;
 export const BUILTIN_PROMPT_TEMPLATE_PREFIX = "builtin:";
 
 /**
@@ -131,6 +143,23 @@ export const BUILTIN_PROMPT_TEMPLATE_PREFIX = "builtin:";
  */
 export const ADAPTER_OWNED_STATUS_TEMPLATES = new Set<string>([
   "mil-heartbeat-v2",
+  "mil-heartbeat-v3",
+]);
+
+/**
+ * Template names that require the in-process Paperclip MCP tool server
+ * (`paperclip-mcp`) to be registered in the per-run HERMES_HOME's
+ * `config.yaml`. When the resolved template is in this set, `execute.ts`
+ * builds a per-run HERMES_HOME with the `mcp_servers.paperclip` block
+ * baked in (carrying the run's authToken + scope via env), and spawns
+ * hermes with `HERMES_HOME` pointing at it.
+ *
+ * Kept separate from `ADAPTER_OWNED_STATUS_TEMPLATES` so future templates
+ * can opt into MCP without adopting the RESULT-marker flow, or vice
+ * versa.
+ */
+export const MCP_TOOL_TEMPLATES = new Set<string>([
+  "mil-heartbeat-v3",
 ]);
 
 /** Regex to extract session ID from Hermes CLI output. */
