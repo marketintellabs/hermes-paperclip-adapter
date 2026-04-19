@@ -52,6 +52,7 @@ import { buildPerRunHermesHome } from "./hermes-home.js";
 import type { PerRunHermesHome } from "./hermes-home.js";
 import { collectMcpTelemetry, type McpTelemetry } from "./mcp-telemetry.js";
 import { scanForBypass } from "./bypass-detector.js";
+import { sessionExistsInHermesDb, resolveRealHermesHome } from "./session-probe.js";
 import { ADAPTER_VERSION } from "../shared/version.js";
 
 import {
@@ -398,30 +399,79 @@ export function isPlausibleSessionId(id: string | null | undefined): boolean {
 
 /**
  * Decide whether a stored `prevSessionId` is safe to pass to
- * `hermes chat --resume <id>`. Returns the validated id (or "") plus a
- * flag indicating whether we actively rejected a non-empty input.
+ * `hermes chat --resume <id>`. Two layers of defence, in order:
  *
- * Rationale ("from"-poisoning loop):
+ *   1. Shape check (0.8.3+): reject tokens that don't look like a real
+ *      session id ("from", "run", short English words, etc.). Catches
+ *      the classic regex-false-positive case where Hermes' own
+ *      "Session not found: <token>" error prose poisons the stored
+ *      session id.
  *
- * A non-existent or malformed session id makes Hermes exit with
- * `Session not found: <id>` on stderr. Before 0.8.2, our legacy
- * session-id regex could re-capture the `<id>` fragment from that very
- * error and persist it as the run's `session_id_after`, which then
- * became the next run's `session_id_before` — an infinite crash loop
- * affecting thousands of heartbeat runs. 0.8.2 tightened the regex and
- * added `isPlausibleSessionId`; this guard is the second line of
- * defense: even if some OTHER store (a Hermes SQLite state file, a
- * paperclip cache we missed) still holds a poisoned value, we refuse
- * to pass it to `--resume` and let the run create a fresh session.
+ *   2. Existence probe (0.8.5+, optional): look up the id in Hermes'
+ *      `state.db`. If state.db says the id is not there, reject with
+ *      `reason = "not_in_state_db"`. Catches plausibly-shaped session
+ *      ids that were wiped from disk after being persisted by
+ *      paperclip (container restarts, state.db resets, etc.). Pass
+ *      `probe: sessionExistsInHermesDb` from execute() to enable; the
+ *      probe is injected rather than imported here so unit tests can
+ *      stub it without touching SQLite.
+ *
+ * The probe is fail-open: if it returns `exists: null` (no db, IO
+ * error, native sqlite missing) we trust the caller — Hermes' own
+ * lookup is the ultimate authority and we'd rather occasionally let
+ * a broken resume through than reject every resume when the probe
+ * misbehaves.
+ *
+ * Returns the validated id (empty string when rejected or absent)
+ * plus a rejection reason so callers can log meaningful diagnostics.
  *
  * Exported for unit tests.
  */
+export type ResumeResolutionReason =
+  | "empty"
+  | "ok_shape_only"
+  | "ok_probe_confirmed"
+  | "ok_probe_unavailable"
+  | "rejected_shape"
+  | "rejected_not_in_state_db";
+
+export interface ResumeResolution {
+  sessionId: string;
+  rejected: boolean;
+  reason: ResumeResolutionReason;
+  /** Probe diagnostic — populated when a probe ran (null otherwise). */
+  probeDetail?: string;
+}
+
 export function resolveResumeSessionId(
   raw: string | null | undefined,
-): { sessionId: string; rejected: boolean } {
-  if (!raw) return { sessionId: "", rejected: false };
-  if (isPlausibleSessionId(raw)) return { sessionId: raw, rejected: false };
-  return { sessionId: "", rejected: true };
+  probe?: (id: string) => { exists: boolean | null; reason?: string },
+): ResumeResolution {
+  if (!raw) return { sessionId: "", rejected: false, reason: "empty" };
+  if (!isPlausibleSessionId(raw)) {
+    return { sessionId: "", rejected: true, reason: "rejected_shape" };
+  }
+  if (!probe) {
+    return { sessionId: raw, rejected: false, reason: "ok_shape_only" };
+  }
+  const result = probe(raw);
+  if (result.exists === true) {
+    return { sessionId: raw, rejected: false, reason: "ok_probe_confirmed" };
+  }
+  if (result.exists === false) {
+    return {
+      sessionId: "",
+      rejected: true,
+      reason: "rejected_not_in_state_db",
+      probeDetail: result.reason,
+    };
+  }
+  return {
+    sessionId: raw,
+    rejected: false,
+    reason: "ok_probe_unavailable",
+    probeDetail: result.reason,
+  };
 }
 
 /** Regex to extract token usage from Hermes output. */
@@ -1013,18 +1063,44 @@ export async function execute(
   // system is designed for human-attended interactive sessions.
   args.push("--yolo");
 
-  // Session resume. See resolveResumeSessionId for the shape check and
-  // the "from"-poisoning-loop rationale.
+  // Session resume. Two layers of defence — see resolveResumeSessionId:
+  //   1. shape check (0.8.3) — reject session-like strings that can't
+  //      possibly be real (regex-false-positive case).
+  //   2. state.db existence probe (0.8.5) — reject plausibly-shaped
+  //      ids that aren't in Hermes' SQLite session table anymore
+  //      (container restarts, state.db resets, etc.).
+  // Both rejections produce a fresh session on this run rather than a
+  // `Session not found: <id>` crash loop.
   const prevSessionIdRaw = cfgString(
     (ctx.runtime?.sessionParams as Record<string, unknown> | null)?.sessionId,
   );
-  const resume = resolveResumeSessionId(prevSessionIdRaw);
+  const resumeProbe = (id: string) => {
+    const r = sessionExistsInHermesDb(id, resolveRealHermesHome(process.env));
+    return { exists: r.exists, reason: "reason" in r ? r.reason : undefined };
+  };
+  const resume = resolveResumeSessionId(
+    prevSessionIdRaw,
+    persistSession ? resumeProbe : undefined,
+  );
   if (persistSession && resume.rejected) {
+    const summary =
+      resume.reason === "rejected_shape"
+        ? "shape check failed"
+        : `not found in state.db${resume.probeDetail ? ` (${resume.probeDetail})` : ""}`;
     await ctx.onLog(
       "stdout",
-      `[hermes] rejecting implausible prevSessionId=${JSON.stringify(
+      `[hermes] rejecting prevSessionId=${JSON.stringify(
         prevSessionIdRaw,
-      )} (shape check failed) — will create a fresh session\n`,
+      )} (${summary}) — will create a fresh session\n`,
+    );
+  } else if (persistSession && resume.reason === "ok_probe_unavailable") {
+    // Non-fatal diagnostic: probe couldn't confirm existence, but we're
+    // letting the resume through. Log once per run so a wave of
+    // probe-unavailable resumes is discoverable via stdout_excerpt
+    // searches without having to correlate exit codes.
+    await ctx.onLog(
+      "stdout",
+      `[hermes] session-probe unavailable (${resume.probeDetail ?? "unknown"}) — resuming on shape-only trust\n`,
     );
   }
   if (persistSession && resume.sessionId) {

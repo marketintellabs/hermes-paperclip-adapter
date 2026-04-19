@@ -170,28 +170,51 @@ describe("isPlausibleSessionId", () => {
   });
 });
 
-describe("resolveResumeSessionId (0.8.3 resume guard)", () => {
+describe("resolveResumeSessionId (0.8.3 shape guard)", () => {
   it("returns empty + rejected=false for null/empty", () => {
-    assert.deepEqual(resolveResumeSessionId(null), { sessionId: "", rejected: false });
-    assert.deepEqual(resolveResumeSessionId(undefined), { sessionId: "", rejected: false });
-    assert.deepEqual(resolveResumeSessionId(""), { sessionId: "", rejected: false });
+    assert.deepEqual(resolveResumeSessionId(null), {
+      sessionId: "",
+      rejected: false,
+      reason: "empty",
+    });
+    assert.deepEqual(resolveResumeSessionId(undefined), {
+      sessionId: "",
+      rejected: false,
+      reason: "empty",
+    });
+    assert.deepEqual(resolveResumeSessionId(""), {
+      sessionId: "",
+      rejected: false,
+      reason: "empty",
+    });
   });
 
-  it("passes through a plausible uuid-style session id", () => {
+  it("passes through a plausible uuid-style session id (shape-only trust)", () => {
     const uuid = "20260419_211331_fc5725";
-    assert.deepEqual(resolveResumeSessionId(uuid), { sessionId: uuid, rejected: false });
+    assert.deepEqual(resolveResumeSessionId(uuid), {
+      sessionId: uuid,
+      rejected: false,
+      reason: "ok_shape_only",
+    });
   });
 
-  it("passes through a plausible UUID", () => {
+  it("passes through a plausible UUID (shape-only trust)", () => {
     const uuid = "5c6e0e1b-9f47-4d6e-8a5c-a5a9b6a8d1f7";
-    assert.deepEqual(resolveResumeSessionId(uuid), { sessionId: uuid, rejected: false });
+    assert.deepEqual(resolveResumeSessionId(uuid), {
+      sessionId: uuid,
+      rejected: false,
+      reason: "ok_shape_only",
+    });
   });
 
   it("rejects the legacy 'from'-poisoning token", () => {
     // This is the exact value ~3800 heartbeat_runs were poisoned with
     // before the 0.8.2 regex fix. If it ever reappears in session_params,
     // the guard must strip it so Hermes creates a fresh session.
-    assert.deepEqual(resolveResumeSessionId("from"), { sessionId: "", rejected: true });
+    const r = resolveResumeSessionId("from");
+    assert.equal(r.sessionId, "");
+    assert.equal(r.rejected, true);
+    assert.equal(r.reason, "rejected_shape");
   });
 
   it("rejects other short english words and fragments", () => {
@@ -199,13 +222,77 @@ describe("resolveResumeSessionId (0.8.3 resume guard)", () => {
       const r = resolveResumeSessionId(w);
       assert.equal(r.sessionId, "", `should strip ${w}`);
       assert.equal(r.rejected, true, `should flag ${w} as rejected`);
+      assert.equal(r.reason, "rejected_shape");
     }
   });
 
   it("rejects pure-alpha ids that pass length but have no digit/dash/underscore", () => {
-    assert.deepEqual(resolveResumeSessionId("abcdefghij"), {
-      sessionId: "",
-      rejected: true,
+    const r = resolveResumeSessionId("abcdefghij");
+    assert.equal(r.sessionId, "");
+    assert.equal(r.rejected, true);
+    assert.equal(r.reason, "rejected_shape");
+  });
+});
+
+describe("resolveResumeSessionId (0.8.5 state.db existence probe)", () => {
+  const GOOD = "20260419_222221_c19d0c";
+
+  it("confirms via probe when session exists", () => {
+    const r = resolveResumeSessionId(GOOD, () => ({ exists: true }));
+    assert.deepEqual(r, {
+      sessionId: GOOD,
+      rejected: false,
+      reason: "ok_probe_confirmed",
     });
+  });
+
+  it("rejects plausibly-shaped ids that aren't in state.db (A.1 regression)", () => {
+    // The exact failure mode that drove 0.8.5: a plausibly-shaped
+    // session id (passes the 0.8.3 shape guard) that no longer exists
+    // on disk and keeps crashing Hermes with `Session not found`.
+    const r = resolveResumeSessionId(GOOD, () => ({ exists: false }));
+    assert.equal(r.sessionId, "");
+    assert.equal(r.rejected, true);
+    assert.equal(r.reason, "rejected_not_in_state_db");
+  });
+
+  it("propagates probe reason on rejection for diagnostics", () => {
+    const r = resolveResumeSessionId(GOOD, () => ({
+      exists: false,
+      reason: "confirmed-absent-by-test",
+    }));
+    assert.equal(r.probeDetail, "confirmed-absent-by-test");
+  });
+
+  it("fails open when probe returns null (state.db missing / native sqlite err)", () => {
+    const r = resolveResumeSessionId(GOOD, () => ({
+      exists: null,
+      reason: "state.db missing",
+    }));
+    assert.equal(r.sessionId, GOOD, "resume must proceed when probe is inconclusive");
+    assert.equal(r.rejected, false);
+    assert.equal(r.reason, "ok_probe_unavailable");
+    assert.equal(r.probeDetail, "state.db missing");
+  });
+
+  it("does not invoke probe when raw id is absent", () => {
+    let called = false;
+    const probe = () => {
+      called = true;
+      return { exists: false };
+    };
+    resolveResumeSessionId(null, probe);
+    assert.equal(called, false, "probe must not run on empty input");
+  });
+
+  it("does not invoke probe when raw id fails the shape check", () => {
+    let called = false;
+    const probe = () => {
+      called = true;
+      return { exists: true };
+    };
+    const r = resolveResumeSessionId("from", probe);
+    assert.equal(called, false, "probe must short-circuit on shape rejection");
+    assert.equal(r.reason, "rejected_shape");
   });
 });

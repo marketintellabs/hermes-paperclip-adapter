@@ -182,7 +182,25 @@ surgical so rebases stay tractable:
     most Paperclip runs, so the banner version was effectively
     invisible. Zero-risk addition (pure read), no changes to existing
     fields.
-14. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+14. **Pre-spawn session existence probe** (0.8.5-mil.0): the 0.8.3
+    shape guard only catches session ids that *look* wrong. 0.8.5
+    adds a second layer — `sessionExistsInHermesDb` opens
+    `$HERMES_HOME/state.db` read-only via Node 24's `node:sqlite`
+    and asks `SELECT 1 FROM sessions WHERE id = ?` before passing
+    `--resume <id>` to `hermes chat`. A definite `false` rejects the
+    resume (`reason: "rejected_not_in_state_db"`); anything
+    inconclusive (missing db, schema drift, IO error) is `null` and
+    fails open so a broken probe can't block all resumes. This fixes
+    the A.1 runbook case where paperclip had stale but
+    plausibly-shaped session ids for sessions Hermes had already
+    wiped, producing an indefinite `adapter_failed` loop.
+    `resolveResumeSessionId` now returns a richer
+    `{sessionId, rejected, reason, probeDetail}` shape so log lines
+    and downstream persistence can distinguish the three failure
+    modes. Nine new tests in `session-probe.test.ts` (fail-open,
+    fail-closed, corrupt-db, missing-table) plus six in
+    `parse-hermes-output.test.ts` for the guard's decision tree.
+15. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
     tag push.
 
 Everything else is expected to stay in lockstep with upstream.

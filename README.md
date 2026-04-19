@@ -86,6 +86,34 @@ often truncated past the startup banner. The MCP server banner
 (`[paperclip-mcp] server paperclip@<version> connected …`) now reads
 from the same source.
 
+**0.8.5-mil.0 — pre-spawn session existence probe:** closes the
+A.1 gap in the 0.8.3 resume guard. 0.8.3 rejected session ids whose
+*shape* was wrong (`"from"`, `"run"`, short English words); 0.8.5
+rejects session ids whose shape looks right but that don't actually
+exist in Hermes' SQLite session store. These appeared when
+Paperclip's `agent_task_sessions.session_params_json.sessionId` kept
+a reference to a session that was later wiped from disk (container
+restart, state.db reset, ops prune). The next heartbeat would replay
+`--resume <id>`, Hermes would exit with `Session not found: <id>`,
+and the run would fail — forever, because the parser correctly
+refuses to poison `session_id_after` from that error prose but the
+*pre-existing* id keeps driving `--resume`.
+
+The new `sessionExistsInHermesDb` probe (see
+`src/server/session-probe.ts`) opens `$HERMES_HOME/state.db`
+read-only via Node 24's stable `node:sqlite`, looks up the id in
+`sessions`, and returns `{ exists: true|false|null }`. A definitive
+`false` rejects the resume with a new
+`reason: "rejected_not_in_state_db"` code; a `null` (no db, schema
+drift, IO error) fails OPEN so a broken probe can never block all
+resumes — Hermes' own lookup remains the source of truth. Log lines
+are `[hermes] rejecting prevSessionId=... (not found in state.db)` and
+`[hermes] session-probe unavailable (...) — resuming on shape-only
+trust` respectively. Fifteen new tests in
+`parse-hermes-output.test.ts` + `session-probe.test.ts` cover the
+probe's fail-open/closed/unavailable paths and the guard's three-level
+decision tree.
+
 **0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
 `--resume <id>` names an unknown session it prints
 `"Use a session ID from a previous CLI run"`. The legacy non-quiet
@@ -105,7 +133,7 @@ Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
 back. The 0.8.x hardening only kicks in on v3 runs. See the
 [fork divergence list](./UPSTREAM.md#divergence-from-upstream)
-(items 8–13) for the implementation sketch.
+(items 8–14) for the implementation sketch.
 
 ## MIL-specific features
 
