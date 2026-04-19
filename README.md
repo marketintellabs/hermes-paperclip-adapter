@@ -16,41 +16,68 @@ A [Paperclip](https://paperclip.ing) adapter that lets you run [Hermes Agent](ht
 
 Hermes Agent is a full-featured AI agent by [Nous Research](https://nousresearch.com) with 30+ native tools, persistent memory, session persistence, 80+ skills, MCP support, and multi-provider model access.
 
-## Currently in flight (0.7.x)
+## Currently in flight (0.8.x)
 
-The active workstream in this fork is **replacing curl-in-prompt with a
-structured MCP tool server**. Hermes agents at MarketIntelLabs previously
-interacted with Paperclip by executing `curl` commands the prompt template
-spelled out for them — reliable-ish for reads, error-prone for writes, and
-impossible to scope. The `0.7.0-mil.0` release (April 2026) ships:
+The active workstream in this fork is **hardening the MCP tool plane**
+shipped in 0.7.0. Hermes agents at MarketIntelLabs used to drive
+Paperclip by executing `curl` commands the prompt template spelled out
+for them — reliable-ish for reads, error-prone for writes, impossible to
+scope, and impossible to audit. 0.7.0 moved all Paperclip interactions
+onto a structured stdio MCP server (`paperclip-mcp`). 0.8.x closes the
+observability, trust, and reliability gaps that surfaced once real
+agents were running on v3:
 
-- **An in-process MCP tool server** (`paperclip-mcp`, built on
-  `@modelcontextprotocol/sdk@^1.29`) with four tools: `list_my_issues`,
-  `get_issue`, `post_issue_comment`, `create_sub_issue`.
-- **Per-run `HERMES_HOME` isolation** — each adapter run gets a fresh
-  `/tmp/paperclip-run-<id>/` that symlinks real-home entries (sessions,
-  skills, `.env`) but injects a per-run `config.yaml` containing an
-  `mcp_servers.paperclip` block with that run's JWT + agent/company/issue
-  scope. No config race between concurrent agents on the same container.
-- **Scope enforcement as a security boundary** — `PAPERCLIP_ISSUE_ID`
-  bounds every write. Reads stay open so agents can inspect blockers.
-- **Call-explosion cap** (`MAX_TOOL_CALLS=20`) and HTTP-status retry
-  classifier (`retryPolicy: retry | fix-args | abort`) so the LLM's
-  failure behaviour matches the failure class.
-- **Structured per-call logs** (`[paperclip-mcp-log] {...}` JSON on
-  stderr) with `callId`, tool name, args, duration, and outcome.
-- **A new `builtin:mil-heartbeat-v3` prompt template** that strips every
-  curl example, mandates tool use, and enforces `list_my_issues` as the
-  first action of a heartbeat wake.
+**0.8.0-mil.0 (April 2026) — hardening:**
+
+- **`update_issue_status` MCP tool** with scope enforcement — the LLM can
+  transition an issue to `done`/`blocked`/`cancelled` through a
+  structured call instead of a `RESULT:` marker, while the adapter
+  still enforces `PAPERCLIP_ISSUE_ID` as the write boundary.
+- **Per-call NDJSON audit log** written by the MCP server to
+  `$HERMES_HOME/mcp-tool-calls.ndjson` (one `tool_call_start` /
+  `tool_call_end` record per invocation), collected by `execute.ts` into
+  `resultJson.toolCalls`, `toolCallCount`, `toolErrorCount`. First
+  trustworthy record of what the LLM *actually* invoked (separate from
+  whatever prose it wrote in its final response).
+- **Curl-bypass detector** — post-run scan of stdout/stderr for
+  `curl ... localhost:3100` and `/api/issues/...` shell invocations;
+  flags the run with `errorCode: tool_bypass_attempt` so LLMs that
+  ignore the "use tools, not curl" rule can't slip by unnoticed.
+- **MCP subprocess liveness file + death detection** — the server
+  writes its PID at startup and removes it on clean exit; the adapter
+  detects stale PIDs post-run and flips `errorCode: tool_server_died`
+  with the last-known call count. No more silent tool-plane failures.
+- **`builtin:mil-heartbeat-v3` prompt update** — prefers the new
+  `update_issue_status` tool over the `RESULT:` marker (marker retained
+  as a structured fallback).
+
+**0.8.1-mil.0 — env propagation fix:** Hermes doesn't forward the
+`mcp_servers.paperclip.env` block from the per-run `config.yaml` to its
+stdio subprocess (only selected names like `PAPERCLIP_ISSUE_ID` are
+passed in). `execute.ts` now also propagates `PAPERCLIP_MCP_AUDIT_LOG`
+and `PAPERCLIP_MCP_LIVENESS_FILE` via direct process-env inheritance,
+so the NDJSON and liveness files actually get written.
+
+**0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
+`--resume <id>` names an unknown session it prints
+`"Use a session ID from a previous CLI run"`. The legacy non-quiet
+session-id regex matched the phrase `"session ID from"` and captured
+the literal word `"from"` as a session id; Paperclip persisted it as
+`session_id_after` and the next heartbeat re-ran `--resume from`,
+crashing in exactly the same way. Fix is three layers of defense:
+anchor the legacy regex to `session_id:` / `session saved:` with a
+mandatory colon, reject captured tokens that don't look like real
+session ids (`isPlausibleSessionId` — min length, must contain a
+digit/hyphen/underscore), and skip session-id extraction entirely when
+`"Session not found"` appears in the output. Regression pinned by nine
+new tests in `parse-hermes-output.test.ts` (driven by the MAR-30
+heartbeat crash loop on 2026-04-19).
 
 Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
-back. See the [fork divergence list](./UPSTREAM.md#divergence-from-upstream)
-(item 8) for the implementation sketch.
-
-Follow-up PR (4.1) will add MCP subprocess health checks + auto-restart
-and an adapter-side curl-bypass transcript detector, once we have real
-v3 transcripts to tune the thresholds against.
+back. The 0.8.x hardening only kicks in on v3 runs. See the
+[fork divergence list](./UPSTREAM.md#divergence-from-upstream)
+(items 8–11) for the implementation sketch.
 
 ## MIL-specific features
 
@@ -62,9 +89,23 @@ Features you get in this fork that upstream doesn't ship:
   `RESULT:` marker, instead of trusting the LLM to run the status
   `PATCH` itself. See [`src/server/result-marker.ts`](./src/server/result-marker.ts).
 - **MCP tool server** (`builtin:mil-heartbeat-v3`, 0.7.0+) — see
-  [Currently in flight](#currently-in-flight-07x) above.
+  [Currently in flight](#currently-in-flight-08x) above.
 - **Per-run `HERMES_HOME`** (0.7.0+) — race-free per-run configuration
   for the MCP server. See [`src/server/hermes-home.ts`](./src/server/hermes-home.ts).
+- **MCP tool audit + bypass + death detection** (0.8.0+) — every run
+  that used the MCP tool plane gets a trustworthy record of which
+  tools were invoked (`resultJson.toolCalls`), a flag when the LLM
+  tried to bypass it with `curl` (`errorCode: tool_bypass_attempt`),
+  and a flag when the stdio subprocess died mid-run
+  (`errorCode: tool_server_died`). See `src/server/mcp-telemetry.ts`,
+  `src/server/bypass-detector.ts`.
+- **`update_issue_status` MCP tool** (0.8.0+) — structured status
+  transitions enforced by `PAPERCLIP_ISSUE_ID` scope. Replaces the
+  `RESULT:` marker as the preferred signal; marker stays as a
+  fallback.
+- **Session-id poisoning guard** (0.8.2+) — the legacy session-id
+  regex is anchored and validated so Hermes' own error prose can't be
+  mis-captured as a session id (MAR-30 heartbeat crash-loop regression).
 - **OpenRouter model-prefix hints** — `anthropic/`, `openai/`, `x-ai/`,
   `zai-org/` model IDs route to `provider: openrouter` automatically.
 - **Two MIL heartbeat prompt templates** shipped in the package
@@ -315,7 +356,21 @@ For agents on `builtin:mil-heartbeat-v3`, the adapter additionally:
 
 Hermes spawns the `paperclip-mcp` subprocess over stdio. All tool calls
 go through that subprocess with a server-side `MAX_TOOL_CALLS=20` cap,
-structured per-call logging (`[paperclip-mcp-log]`), and scope enforcement.
+structured per-call logging (`[paperclip-mcp-log]`), and scope
+enforcement. 0.8.0+ additionally writes two sidecar files inside the
+per-run `HERMES_HOME`:
+
+- `mcp-tool-calls.ndjson` — one `tool_call_start` / `tool_call_end`
+  JSON record per invocation. `execute.ts` reads this after the run
+  and fills `resultJson.toolCalls` / `toolCallCount` / `toolErrorCount`.
+- `mcp-server.pid` — written at startup, removed on clean exit.
+  `execute.ts` checks it post-run to detect a crashed tool plane
+  (`errorCode: tool_server_died`).
+
+Both files' paths are passed to the subprocess via
+`PAPERCLIP_MCP_AUDIT_LOG` / `PAPERCLIP_MCP_LIVENESS_FILE` env vars set
+directly on the Hermes process (Hermes does not forward the per-server
+`env` block in `config.yaml` to stdio subprocesses — 0.8.1 fix).
 
 ## Development
 
@@ -324,7 +379,7 @@ git clone https://github.com/marketintellabs/hermes-paperclip-adapter
 cd hermes-paperclip-adapter
 npm install
 npm run build
-npm test       # 46 tests across 11 suites
+npm test       # 101 tests across 23 suites
 ```
 
 See [`AGENTS.md`](./AGENTS.md) for the source tree layout and

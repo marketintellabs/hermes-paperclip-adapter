@@ -361,8 +361,38 @@ function buildPrompt(
 /** Regex to extract session ID from Hermes quiet-mode output: "session_id: <id>" */
 const SESSION_ID_REGEX = /^session_id:\s*(\S+)/m;
 
-/** Regex for legacy session output format */
-const SESSION_ID_REGEX_LEGACY = /session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i;
+/**
+ * Regex for legacy (non-quiet) session output format. Must be strict: only
+ * accept the exact `session_id:` / `session id:` / `session saved:` prefix
+ * followed by an id-shaped token. Earlier versions matched the looser
+ * `/session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i` which false-positives
+ * on Hermes' own error text (`"Session not found: from\nUse a session ID
+ * from a previous CLI run"` → captured "from" and poisoned paperclip's
+ * stored session id, see the 2026-04-19 MAR-30 heartbeat crash loop).
+ *
+ * We also anchor to line start and require the colon to exclude the
+ * `session ID from` phrase entirely.
+ */
+const SESSION_ID_REGEX_LEGACY =
+  /(?:^|\n)\s*session[_ ](?:id|saved)\s*:\s*([A-Za-z0-9][A-Za-z0-9_-]{7,})\b/i;
+
+/**
+ * Shape-validate a candidate session id before trusting it. Hermes session
+ * ids are UUID-like (hyphenated hex) or long opaque tokens; they are never
+ * short English words. Rejecting these prevents stderr-fragment regex
+ * false-positives from poisoning `session_id_after`.
+ *
+ * Exported for unit tests.
+ */
+export function isPlausibleSessionId(id: string | null | undefined): boolean {
+  if (!id) return false;
+  if (id.length < 8) return false;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,}$/.test(id)) return false;
+  // Dictionary-like tokens ("fromprevious", "session") are not session ids.
+  // Require either a digit, a hyphen, or an underscore.
+  if (!/[0-9_-]/.test(id)) return false;
+  return true;
+}
 
 /** Regex to extract token usage from Hermes output. */
 const TOKEN_USAGE_REGEX =
@@ -768,19 +798,33 @@ export function parseHermesOutput(stdout: string, stderr: string): ParsedOutput 
   //   <response text>
   //
   //   session_id: <id>
+  // Before attempting any session-id extraction, look for explicit
+  // "Session not found" / "Use a session ID" error text. When Hermes
+  // aborts because of a bad --resume id, our extracted token is almost
+  // certainly a false-positive from that error message and must not be
+  // propagated back to paperclip (otherwise the next heartbeat replays
+  // the poisoned id and crashes again — see the legacy-regex fix above).
+  const sessionErrorPresent =
+    /Session not found\s*:/i.test(combined) ||
+    /Use a session ID from a previous CLI run/i.test(combined);
+
   const sessionMatch = stdout.match(SESSION_ID_REGEX);
-  if (sessionMatch?.[1]) {
-    result.sessionId = sessionMatch?.[1] ?? null;
+  if (sessionMatch?.[1] && isPlausibleSessionId(sessionMatch[1])) {
+    result.sessionId = sessionMatch[1];
     // The response is everything before the session_id line
     const sessionLineIdx = stdout.lastIndexOf("\nsession_id:");
     if (sessionLineIdx > 0) {
       result.response = cleanResponse(stdout.slice(0, sessionLineIdx));
     }
   } else {
-    // Legacy format (non-quiet mode)
-    const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
-    if (legacyMatch?.[1]) {
-      result.sessionId = legacyMatch?.[1] ?? null;
+    // Legacy format (non-quiet mode). Only trust it if we don't see
+    // Hermes' own "Session not found" error nearby, and the token looks
+    // like a real session id.
+    if (!sessionErrorPresent) {
+      const legacyMatch = combined.match(SESSION_ID_REGEX_LEGACY);
+      if (legacyMatch?.[1] && isPlausibleSessionId(legacyMatch[1])) {
+        result.sessionId = legacyMatch[1];
+      }
     }
     // In non-quiet mode, extract clean response from stdout by
     // filtering out tool lines, system messages, and noise
