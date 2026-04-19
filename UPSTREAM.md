@@ -52,12 +52,24 @@ surgical so rebases stay tractable:
    in the MarketIntelLabs infra repo for the design rationale.
    Legacy templates keep the pre-0.4.0 behaviour (LLM PATCHes status
    itself) with the 0.3.2-mil.0 safety-net reconciler still active.
-5. **Post-run safety-net reconciler** (0.3.2-mil.0): for legacy templates
+5. **Runtime hardening** (0.4.1-mil.0): `parseHermesOutput` only flips
+   `errorMessage` on strong failure signatures (line-start `Error:`,
+   `Fatal:`, `Traceback (most recent call last):`, unhandled rejections,
+   panics) instead of any stderr line containing the substring
+   `error`/`failed`. The post-run `runSucceeded` guard in `execute.ts`
+   now trusts only `exitCode` + `timedOut`, never `errorMessage`. Any
+   `RESULT:` marker is also stripped from `summary` and `resultJson.result`
+   unconditionally so the marker never leaks into Paperclip auto-comments.
+   Regression driven by MAR-27 (2026-04-19), where benign stderr
+   mentions of "error"/"failed" silently skipped adapter-owned status
+   reconciliation and Paperclip's continuation retry then reported
+   `adapter_failed`.
+6. **Post-run safety-net reconciler** (0.3.2-mil.0): for legacy templates
    only, after a successful Hermes exit the adapter GETs the issue and
    PATCHes it to `done` if it is still `todo`/`in_progress`. Closes a
    race with upstream Paperclip's `reconcileStrandedAssignedIssues`
    watchdog.
-6. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+7. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
    tag push.
 
 Everything else is expected to stay in lockstep with upstream.
