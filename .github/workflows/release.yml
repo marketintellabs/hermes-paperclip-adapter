@@ -36,11 +36,17 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           # MIL fork releases are all prereleases ("-mil.N" SemVer tag).
-          # npm now requires an explicit dist-tag for prereleases so they
-          # can't land on `latest` by accident. Publish under `mil`.
+          # npm requires an explicit dist-tag for prereleases so they
+          # can't land on `latest` by accident. We publish under `mil`
+          # AND then move `latest` forward because this fork has no
+          # non-prerelease stream — `latest` is effectively MIL, and
+          # the npmjs.com website renders the README of whatever
+          # `latest` points at.
           VERSION="$(node -p "require('./package.json').version")"
+          PKG="$(node -p "require('./package.json').name")"
           if [[ "$VERSION" == *-* ]]; then
             npm publish --access public --provenance --tag mil
+            npm dist-tag add "${PKG}@${VERSION}" latest
           else
             npm publish --access public --provenance
           fi
