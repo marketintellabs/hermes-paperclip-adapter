@@ -57,6 +57,20 @@ export interface PaperclipMcpScope {
 export interface PerRunHermesHome {
   /** Absolute path to the temp dir that should be set as `HERMES_HOME`. */
   path: string;
+  /**
+   * Absolute path to the NDJSON audit file the MCP server appends to
+   * for every completed tool call. The adapter reads this post-run
+   * and surfaces the records as `resultJson.toolCalls`. File may not
+   * exist if no tool calls happened.
+   */
+  auditLogPath: string;
+  /**
+   * Absolute path to the MCP server's liveness file. Present while the
+   * MCP child is alive, deleted on clean shutdown. The adapter inspects
+   * this post-run to detect MCP processes that died unexpectedly
+   * (OOM, uncaughtException) — those get flagged errorCode=tool_server_died.
+   */
+  livenessFilePath: string;
   /** Async cleanup — call from a try/finally around the hermes spawn. */
   cleanup: () => Promise<void>;
 }
@@ -76,12 +90,26 @@ export function resolveMcpCliPath(): string {
 }
 
 /**
+ * Extra paths the adapter passes to the MCP server so it can write
+ * telemetry (audit trail + liveness marker) that execute.ts collects
+ * post-run. All absolute paths; optional — missing fields just disable
+ * the corresponding feature in the MCP server.
+ */
+export interface McpTelemetryPaths {
+  /** NDJSON sink for per-call audit records. */
+  auditLogPath?: string;
+  /** Liveness PID file (present while alive, removed on clean exit). */
+  livenessFilePath?: string;
+}
+
+/**
  * Build the mcp_servers.paperclip block as a plain JS object. Split out
  * so tests can assert on it without file-system side effects.
  */
 export function buildMcpServerSpec(
   scope: PaperclipMcpScope,
   mcpCliPath: string = resolveMcpCliPath(),
+  telemetry: McpTelemetryPaths = {},
 ): Record<string, unknown> {
   const env: Record<string, string> = {
     PAPERCLIP_API_URL: scope.apiUrl,
@@ -91,6 +119,8 @@ export function buildMcpServerSpec(
   if (scope.companyId) env.PAPERCLIP_COMPANY_ID = scope.companyId;
   if (scope.issueId) env.PAPERCLIP_ISSUE_ID = scope.issueId;
   if (scope.runId) env.PAPERCLIP_RUN_ID = scope.runId;
+  if (telemetry.auditLogPath) env.PAPERCLIP_MCP_AUDIT_LOG = telemetry.auditLogPath;
+  if (telemetry.livenessFilePath) env.PAPERCLIP_MCP_LIVENESS_FILE = telemetry.livenessFilePath;
 
   return {
     command: "node",
@@ -115,6 +145,7 @@ export function mergeMcpServerIntoConfig(
   baseConfigYaml: string,
   scope: PaperclipMcpScope,
   mcpCliPath: string = resolveMcpCliPath(),
+  telemetry: McpTelemetryPaths = {},
 ): string {
   const parsed = (baseConfigYaml.trim() ? parseYaml(baseConfigYaml) : {}) as
     | Record<string, unknown>
@@ -124,7 +155,7 @@ export function mergeMcpServerIntoConfig(
   const existing = (base.mcp_servers as Record<string, unknown> | undefined) ?? {};
   base.mcp_servers = {
     ...existing,
-    paperclip: buildMcpServerSpec(scope, mcpCliPath),
+    paperclip: buildMcpServerSpec(scope, mcpCliPath, telemetry),
   };
 
   return stringifyYaml(base, { lineWidth: 0 });
@@ -177,18 +208,34 @@ export async function buildPerRunHermesHome(
     await mkdir(join(path, "logs"), { recursive: true });
   }
 
+  // Telemetry paths live INSIDE the per-run HERMES_HOME (not symlinked
+  // anywhere) so cleanup takes them with the rest of the dir. We pass
+  // the absolute paths to the MCP server env, and execute.ts reads
+  // them back before cleanup.
+  const telemetry: McpTelemetryPaths = {
+    auditLogPath: join(path, "mcp-tool-calls.ndjson"),
+    livenessFilePath: join(path, "mcp-liveness.json"),
+  };
+
   // Build per-run config.yaml. Start from whatever the real home had,
-  // then inject our mcp_servers.paperclip block.
+  // then inject our mcp_servers.paperclip block (with telemetry env).
   const realConfigPath = join(realHome, "config.yaml");
   let baseYaml = "";
   if (existsSync(realConfigPath)) {
     baseYaml = await readFile(realConfigPath, "utf-8");
   }
-  const mergedYaml = mergeMcpServerIntoConfig(baseYaml, scope, opts.mcpCliPath);
+  const mergedYaml = mergeMcpServerIntoConfig(
+    baseYaml,
+    scope,
+    opts.mcpCliPath,
+    telemetry,
+  );
   await writeFile(join(path, "config.yaml"), mergedYaml, { mode: 0o600 });
 
   return {
     path,
+    auditLogPath: telemetry.auditLogPath!,
+    livenessFilePath: telemetry.livenessFilePath!,
     cleanup: async () => {
       await rm(path, { recursive: true, force: true });
     },

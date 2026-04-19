@@ -49,6 +49,8 @@ import {
 
 import { buildPerRunHermesHome } from "./hermes-home.js";
 import type { PerRunHermesHome } from "./hermes-home.js";
+import { collectMcpTelemetry, type McpTelemetry } from "./mcp-telemetry.js";
+import { scanForBypass } from "./bypass-detector.js";
 
 import {
   detectModel,
@@ -1104,6 +1106,11 @@ export async function execute(
   }
 
   let result;
+  // MCP telemetry is collected BEFORE cleanup because the audit log +
+  // liveness file both live inside the per-run HERMES_HOME tempdir,
+  // which cleanup() blows away. Null when no MCP tool server was
+  // spawned for this run (legacy templates).
+  let mcpTelemetry: McpTelemetry | null = null;
   try {
     result = await runChildProcess(ctx.runId, hermesCmd, args, {
       cwd,
@@ -1114,6 +1121,22 @@ export async function execute(
     });
   } finally {
     if (perRunHome) {
+      try {
+        mcpTelemetry = await collectMcpTelemetry(
+          perRunHome.auditLogPath,
+          perRunHome.livenessFilePath,
+        );
+      } catch (err) {
+        // Telemetry collection must NEVER break a run. If the NDJSON
+        // is unreadable we just lose observability for this run and
+        // log the reason to stderr.
+        await ctx.onLog(
+          "stderr",
+          `[hermes] mcp telemetry collection failed (non-fatal): ${
+            (err as Error).message
+          }\n`,
+        );
+      }
       try {
         await perRunHome.cleanup();
       } catch (err) {
@@ -1174,13 +1197,77 @@ export async function execute(
     executionResult.summary = cleanedResponse.slice(0, 2000);
   }
 
-  // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments)
-  executionResult.resultJson = {
+  // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments).
+  const resultJson: Record<string, unknown> = {
     result: cleanedResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
   };
+
+  // ── MCP telemetry → resultJson ────────────────────────────────────────
+  // When the MCP tool server was used for this run, attach per-call
+  // records + summary counters + subprocess health. This is the only
+  // trustworthy record of which tools the LLM actually invoked — the
+  // LLM's own `result` prose can (and occasionally does) lie about it.
+  if (mcpTelemetry) {
+    resultJson.toolCalls = mcpTelemetry.toolCalls;
+    resultJson.toolCallCount = mcpTelemetry.toolCallCount;
+    resultJson.toolErrorCount = mcpTelemetry.toolErrorCount;
+    resultJson.mcpServerHealth = mcpTelemetry.health;
+
+    await ctx.onLog(
+      "stdout",
+      `[hermes] mcp telemetry: calls=${mcpTelemetry.toolCallCount} ` +
+        `errors=${mcpTelemetry.toolErrorCount} health=${mcpTelemetry.health.status}\n`,
+    );
+
+    // Flag runs where the MCP subprocess crashed mid-flight as a hard
+    // failure so dashboards surface them (it's not a tool-call error,
+    // it's the whole tool plane going away).
+    if (mcpTelemetry.health.status === "died") {
+      executionResult.errorCode = "tool_server_died";
+      executionResult.errorMeta = {
+        ...(executionResult.errorMeta || {}),
+        mcpPid: mcpTelemetry.health.pid,
+        mcpStartedAt: mcpTelemetry.health.startedAt,
+        toolCallCountBeforeDeath: mcpTelemetry.toolCallCount,
+      };
+      executionResult.errorMessage =
+        `paperclip-mcp subprocess (pid ${mcpTelemetry.health.pid}) died mid-run; ` +
+        `tool calls after that point would have silently failed. ` +
+        (executionResult.errorMessage ? `Also: ${executionResult.errorMessage}` : "");
+    }
+  }
+
+  // ── Bypass detector → errorCode ───────────────────────────────────────
+  // Even with MCP available, some LLMs will still construct curl calls
+  // on v3 templates. We don't fail the run (many "bypasses" are legit:
+  // e.g. curling an external news site) — we just annotate so dashboards
+  // can track which agents ignore the rules.
+  const bypass = scanForBypass(result.stdout || "", result.stderr || "");
+  if (bypass.flagged) {
+    resultJson.bypassFlagged = true;
+    resultJson.bypassPatterns = bypass.matches;
+    resultJson.bypassPrimary = bypass.primaryPattern;
+    // Only set errorCode if the run would otherwise look successful —
+    // we don't want bypass detection to mask a real error.
+    if (!executionResult.errorCode) {
+      executionResult.errorCode = "tool_bypass_attempt";
+      executionResult.errorMeta = {
+        ...(executionResult.errorMeta || {}),
+        bypassPrimary: bypass.primaryPattern,
+        bypassMatchCount: bypass.matches.length,
+        bypassFirstSnippet: bypass.matches[0]?.snippet ?? null,
+      };
+    }
+    await ctx.onLog(
+      "stderr",
+      `[hermes] bypass detected: ${bypass.matches.length} match(es), primary=${bypass.primaryPattern}\n`,
+    );
+  }
+
+  executionResult.resultJson = resultJson;
 
   // Store session ID for next run
   if (persistSession && parsed.sessionId) {

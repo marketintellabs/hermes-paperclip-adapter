@@ -19,6 +19,7 @@ import { listMyIssuesTool } from "./list-my-issues.js";
 import { getIssueTool } from "./get-issue.js";
 import { postIssueCommentTool } from "./post-issue-comment.js";
 import { createSubIssueTool } from "./create-sub-issue.js";
+import { updateIssueStatusTool } from "./update-issue-status.js";
 
 // ─── Fake client + ctx ────────────────────────────────────────────────────
 
@@ -386,5 +387,140 @@ describe("create_sub_issue", () => {
     );
     assert.equal(result.isError, true);
     assert.equal(result.retryPolicy, "abort");
+  });
+});
+
+// ─── update_issue_status (scope-restricted terminal transition) ───────────
+
+describe("update_issue_status", () => {
+  it("happy path: PATCHes /issues/{id} with { status } and returns ok", async () => {
+    const { client, calls } = fakeClient(
+      {},
+      { "PATCH /issues/MAR-30": { id: "MAR-30", status: "done" } },
+    );
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-30", status: "done" },
+      ctx,
+    );
+    assert.equal(result.isError, undefined);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].method, "PATCH");
+    assert.equal(calls[0].path, "/issues/MAR-30");
+    assert.deepEqual(calls[0].body, { status: "done" });
+  });
+
+  it("passes statusReason through when reason is provided", async () => {
+    const { client, calls } = fakeClient(
+      {},
+      { "PATCH /issues/MAR-30": { id: "MAR-30", status: "needs_review" } },
+    );
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-30", status: "needs_review", reason: "  editor sign-off required  " },
+      ctx,
+    );
+    assert.equal(result.isError, undefined);
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal(body.status, "needs_review");
+    assert.equal(body.statusReason, "editor sign-off required");
+  });
+
+  it("status=blocked WITHOUT reason → fix-args error (does not hit API)", async () => {
+    // An un-annotated blocked issue is operationally useless. Fail fast
+    // so the LLM retries with context rather than letting Paperclip
+    // accept it and a human wondering "blocked on what?".
+    const { client, calls } = fakeClient({}, {});
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-30", status: "blocked" },
+      ctx,
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.retryPolicy, "fix-args");
+    assert.match(result.text, /'reason' is required/);
+    assert.equal(calls.length, 0);
+  });
+
+  it("status=blocked WITH empty-whitespace reason is treated as missing", async () => {
+    const { client, calls } = fakeClient({}, {});
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-30", status: "blocked", reason: "   \n  " },
+      ctx,
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.retryPolicy, "fix-args");
+    assert.equal(calls.length, 0);
+  });
+
+  it("SCOPE VIOLATION: cannot transition any issue other than the bound one", async () => {
+    const { client, calls } = fakeClient({}, {});
+    const { ctx, logs } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-99", status: "done" },
+      ctx,
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.retryPolicy, "fix-args");
+    assert.match(result.text, /scope violation/);
+    assert.equal(calls.length, 0);
+    assert.equal(logs[0]?.msg, "update_issue_status SCOPE_VIOLATION");
+  });
+
+  it("401 from API → retryPolicy=abort (auth misconfiguration)", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        "PATCH /issues/MAR-30": new PaperclipClientError(
+          "PATCH",
+          "/issues/MAR-30",
+          401,
+          null,
+          "unauthorized",
+        ),
+      },
+    );
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-30", status: "done" },
+      ctx,
+    );
+    assert.equal(result.retryPolicy, "abort");
+  });
+
+  it("404 from API → retryPolicy=fix-args (wrong id)", async () => {
+    const { client } = fakeClient(
+      {},
+      {
+        "PATCH /issues/MAR-30": new PaperclipClientError(
+          "PATCH",
+          "/issues/MAR-30",
+          404,
+          null,
+          "not found",
+        ),
+      },
+    );
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-30", status: "done" },
+      ctx,
+    );
+    assert.equal(result.retryPolicy, "fix-args");
+  });
+
+  it("scope-open runs (heartbeat) can transition any issue", async () => {
+    const { client, calls } = fakeClient(
+      {},
+      { "PATCH /issues/MAR-17": { id: "MAR-17", status: "done" } },
+    );
+    const { ctx } = fakeCtx(client, null);
+    const result = await updateIssueStatusTool.execute(
+      { issueId: "MAR-17", status: "done" },
+      ctx,
+    );
+    assert.equal(result.isError, undefined);
+    assert.equal(calls.length, 1);
   });
 });

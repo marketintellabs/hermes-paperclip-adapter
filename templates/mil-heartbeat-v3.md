@@ -22,6 +22,9 @@ Available Paperclip MCP tools:
 - `mcp_paperclip_get_issue` — full details for one issue
 - `mcp_paperclip_post_issue_comment` — progress updates, delegation notes
 - `mcp_paperclip_create_sub_issue` — delegate work to another agent
+- `mcp_paperclip_update_issue_status` — transition your issue to a
+  terminal status (`done`, `blocked`, `needs_review`). Call this as
+  the LAST tool of your run, right before you end your final message.
 
 DO NOT POST COMPLETION COMMENTS:
 - DO NOT call `mcp_paperclip_post_issue_comment` to summarize what you
@@ -30,11 +33,17 @@ DO NOT POST COMPLETION COMMENTS:
 - You MAY still post comments DURING the run (progress updates,
   sub-task coordination, answering an @mention) — that is expected.
 
-DO NOT PATCH ISSUE STATUS:
-- The adapter owns terminal status transitions (`done`, `blocked`,
-  `cancelled`). There is intentionally NO tool to change status.
-- Instead, END your final message with a RESULT marker (see "How to
-  finish" below).
+HOW TO FINISH (preferred path):
+- Call `mcp_paperclip_update_issue_status` with `status: "done"`
+  (or `"blocked"` / `"needs_review"`) as the LAST tool in your run.
+  For `blocked` you MUST pass a `reason`.
+- Then end your final message with a short 2–5 sentence summary of
+  what you accomplished. The adapter will post that summary as a
+  completion comment on the issue.
+- The old `RESULT: done` / `RESULT: blocked` stdout marker is still
+  honored as a fallback if you forget the tool call, but prefer the
+  tool — it returns an error if the transition is rejected, while a
+  mistyped marker silently no-ops.
 
 === END MANDATORY RULES ===
 
@@ -61,17 +70,22 @@ Title: {{taskTitle}}
    `mcp_paperclip_post_issue_comment` for in-run progress updates.
 3. To delegate, call `mcp_paperclip_create_sub_issue` with
    `parentIssueId: "{{taskId}}"` so the blocker graph stays linked.
-4. End your final message with a RESULT marker (below).
+4. As your LAST tool call, call `mcp_paperclip_update_issue_status`
+   with `issueId: "{{taskId}}"` and the terminal status you want
+   (`done`, `blocked`, or `needs_review`). For `blocked` pass a
+   `reason` explaining what needs to unblock.
+5. Then end your final message with a short 2–5 sentence summary.
 
 Note on tool scope: the tool server enforces that writes (comments,
-sub-issue parents) target THIS issue (`{{taskId}}`) or create new
-issues. Attempting to post to a different issue will return an error.
+status updates, sub-issue parents) target THIS issue (`{{taskId}}`)
+or create new issues. Attempting to write to a different issue will
+return an error.
 
-## How to finish
+## Fallback: RESULT marker (legacy, discouraged)
 
-End your final assistant message with EXACTLY one of these markers on
-its own line, followed by an optional `reason:` line for anything
-other than `done`:
+If you cannot call `mcp_paperclip_update_issue_status` for any reason,
+you MAY fall back to ending your final assistant message with EXACTLY
+one of these markers on its own line:
 
 ```
 RESULT: done
@@ -88,9 +102,8 @@ reason: <one sentence explaining why this task is no longer needed>
 ```
 
 Everything BEFORE the marker becomes the completion summary the
-adapter posts to the issue. Keep it concise (2-5 sentences). If you
-forget the marker, the adapter defaults to `RESULT: done` on a clean
-exit.
+adapter posts to the issue. If you forget BOTH the tool call AND the
+marker, the adapter defaults to `RESULT: done` on a clean exit.
 {{/taskId}}
 
 {{#commentId}}
