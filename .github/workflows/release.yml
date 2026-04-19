@@ -31,6 +31,16 @@ jobs:
       - name: Verify dist + shipped template
         run: test -f dist/server/execute.js && test -f templates/mil-heartbeat.md
 
-      - run: npm publish --access public --provenance
+      - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # MIL fork releases are all prereleases ("-mil.N" SemVer tag).
+          # npm now requires an explicit dist-tag for prereleases so they
+          # can't land on `latest` by accident. Publish under `mil`.
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ "$VERSION" == *-* ]]; then
+            npm publish --access public --provenance --tag mil
+          else
+            npm publish --access public --provenance
+          fi
