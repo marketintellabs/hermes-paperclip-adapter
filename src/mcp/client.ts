@@ -75,8 +75,17 @@ export function createClient(config: PaperclipConfig = loadConfig()): PaperclipC
   const base = config.apiUrl;
   const authHeader = `Bearer ${config.apiKey}`;
 
+  // Concatenate base + path rather than using `new URL(path, base)` with an
+  // absolute path. `new URL("/issues/X", "http://host/api")` discards `/api`
+  // (absolute-path resolution is relative to the *origin*, not the base's
+  // pathname), which would silently route MCP tool calls at the SPA HTML
+  // instead of the JSON API. We want `http://host/api` + `/issues/X` to
+  // produce `http://host/api/issues/X`, so build the string first and let
+  // `URL` parse the final, fully-qualified URL for query-param handling.
   const buildUrl = (path: string, query?: Record<string, string | number | undefined>) => {
-    const url = new URL(path.startsWith("/") ? path : `/${path}`, base);
+    const normalizedBase = base.replace(/\/+$/, "");
+    const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+    const url = new URL(`${normalizedBase}${normalizedPath}`);
     if (query) {
       for (const [k, v] of Object.entries(query)) {
         if (v !== undefined && v !== null && v !== "") {
