@@ -114,6 +114,20 @@ trust` respectively. Fifteen new tests in
 probe's fail-open/closed/unavailable paths and the guard's three-level
 decision tree.
 
+**0.8.6-mil.0 — fail-closed on missing state.db:** production
+verification of 0.8.5 surfaced one remaining gap. 0.8.5 treated a
+missing `state.db` as an *inconclusive* probe result (fail-open),
+but Hermes creates `state.db` lazily on its first write — so the
+file literally not existing means no sessions have ever been
+persisted on this host and the id CANNOT be present. The 0.8.5
+rollout itself hit this: the container restart wiped
+`~/.hermes/state.db`, the probe said "state.db missing" and fell
+open, `--resume` fired, and `Session not found: <id>` took down
+the first heartbeat on 0.8.5. 0.8.6 inverts the decision: missing
+state.db is a definitive "no" (`source: "no-state-db"`), and only
+probe errors that leave state.db readable-but-inconclusive (corrupt
+bytes, schema drift, permission denied) remain fail-open.
+
 **0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
 `--resume <id>` names an unknown session it prints
 `"Use a session ID from a previous CLI run"`. The legacy non-quiet
@@ -133,7 +147,7 @@ Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
 back. The 0.8.x hardening only kicks in on v3 runs. See the
 [fork divergence list](./UPSTREAM.md#divergence-from-upstream)
-(items 8–14) for the implementation sketch.
+(items 8–15) for the implementation sketch.
 
 ## MIL-specific features
 

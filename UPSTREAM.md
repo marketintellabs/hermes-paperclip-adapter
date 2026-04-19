@@ -200,7 +200,17 @@ surgical so rebases stay tractable:
     modes. Nine new tests in `session-probe.test.ts` (fail-open,
     fail-closed, corrupt-db, missing-table) plus six in
     `parse-hermes-output.test.ts` for the guard's decision tree.
-15. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+15. **Probe fail-closed on missing state.db** (0.8.6-mil.0): production
+    verification of 0.8.5 caught a logic bug — "state.db missing"
+    was being treated as inconclusive (fail-open), but a missing
+    state.db is logically equivalent to "no sessions on this host
+    yet" because Hermes creates state.db lazily on first write.
+    0.8.6 returns `{ exists: false, source: "no-state-db" }` for
+    that case, so `--resume` is correctly stripped and Hermes
+    creates a fresh session instead of crashing with
+    `Session not found`. Permission-denied, corrupt bytes, and
+    schema drift remain fail-open.
+16. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
     tag push.
 
 Everything else is expected to stay in lockstep with upstream.

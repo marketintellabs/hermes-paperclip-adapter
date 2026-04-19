@@ -44,13 +44,17 @@ describe("resolveRealHermesHome", () => {
 });
 
 describe("sessionExistsInHermesDb", () => {
-  it("returns exists=null when state.db is missing (fail-open)", () => {
+  it("returns exists=false when state.db is missing (fail-closed, 0.8.6 fix)", () => {
+    // Missing state.db is logically equivalent to "no sessions on
+    // this host yet" — Hermes creates state.db lazily on first
+    // write, so if the file doesn't exist neither does any session.
+    // 0.8.5 treated this as fail-open which let the resume through
+    // and Hermes then crashed on the lookup. 0.8.6 rejects.
     const homeDir = freshTempHome();
     try {
       const r = sessionExistsInHermesDb("20260419_222221_c19d0c", homeDir);
-      assert.equal(r.exists, null);
-      assert.equal(r.source, "probe-failed");
-      assert.match((r as { reason: string }).reason, /state\.db missing/);
+      assert.equal(r.exists, false);
+      assert.equal(r.source, "no-state-db");
     } finally {
       rmSync(homeDir, { recursive: true, force: true });
     }

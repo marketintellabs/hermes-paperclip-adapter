@@ -46,7 +46,7 @@ import { DatabaseSync } from "node:sqlite";
 
 export type SessionProbeResult =
   | { exists: true; source: "state.db" }
-  | { exists: false; source: "state.db" }
+  | { exists: false; source: "state.db" | "no-state-db" }
   | { exists: null; source: "probe-failed"; reason: string };
 
 /**
@@ -83,8 +83,21 @@ export function sessionExistsInHermesDb(
 ): SessionProbeResult {
   const dbPath = join(hermesHome, "state.db");
 
+  // A missing state.db is NOT an inconclusive probe failure — Hermes
+  // lazily creates state.db on its first write, so if the file doesn't
+  // exist then Hermes has never persisted any sessions on this host
+  // and the requested id CANNOT be present. Treat as a definitive
+  // "not found" so we strip --resume and let Hermes create a fresh
+  // session instead of crashing with "Session not found".
+  //
+  // This is the exact failure mode that manifested right after the
+  // 0.8.5 container rollout wiped the ephemeral ~/.hermes: state.db
+  // didn't exist yet, 0.8.5 failed open, `hermes chat --resume <id>`
+  // ran anyway, and `Session not found: <id>` took down the heartbeat.
+  // 0.8.6 closes that window by treating "no state.db" as "no
+  // sessions".
   if (!existsSync(dbPath)) {
-    return { exists: null, source: "probe-failed", reason: "state.db missing" };
+    return { exists: false, source: "no-state-db" };
   }
 
   let db: DatabaseSync | null = null;
