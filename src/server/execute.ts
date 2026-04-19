@@ -44,7 +44,11 @@ import {
   BUILTIN_PROMPT_TEMPLATES,
   BUILTIN_PROMPT_TEMPLATE_PREFIX,
   ADAPTER_OWNED_STATUS_TEMPLATES,
+  MCP_TOOL_TEMPLATES,
 } from "../shared/constants.js";
+
+import { buildPerRunHermesHome } from "./hermes-home.js";
+import type { PerRunHermesHome } from "./hermes-home.js";
 
 import {
   detectModel,
@@ -890,6 +894,9 @@ export async function execute(
   const adapterOwnedStatus =
     prompt.builtinName !== null &&
     ADAPTER_OWNED_STATUS_TEMPLATES.has(prompt.builtinName);
+  const useMcpToolServer =
+    prompt.builtinName !== null &&
+    MCP_TOOL_TEMPLATES.has(prompt.builtinName);
 
   // ── Build command args ─────────────────────────────────────────────────
   // Use -Q (quiet) to get clean output: just response + session_id line
@@ -1061,13 +1068,67 @@ export async function execute(
     return ctx.onLog(stream, chunk);
   };
 
-  const result = await runChildProcess(ctx.runId, hermesCmd, args, {
-    cwd,
-    env,
-    timeoutSec,
-    graceSec,
-    onLog: wrappedOnLog,
-  });
+  // ── Per-run HERMES_HOME with Paperclip MCP tool server ────────────────
+  // When the template is MCP-enabled (builtin:mil-heartbeat-v3+), we build
+  // a per-run HERMES_HOME temp dir so hermes picks up a `mcp_servers.paperclip`
+  // block carrying THIS run's scope (authToken, agentId, companyId, issueId)
+  // in its env. A shared config.yaml can't carry per-run scope without
+  // racing across concurrent agents that share a department container.
+  // See src/server/hermes-home.ts for the symlink scheme that preserves
+  // session resume + skills while isolating config.yaml.
+  let perRunHome: PerRunHermesHome | null = null;
+  if (useMcpToolServer) {
+    if (!paperclipClient.apiKey) {
+      // Fail fast — a v3 template agent with no apiKey would boot an MCP
+      // server that couldn't authenticate any call; every tool would 401.
+      throw new Error(
+        `[hermes] mcp-tool template (${prompt.builtinName}) requires a ` +
+          `Paperclip API key. ctx.authToken / env PAPERCLIP_API_KEY / ` +
+          `adapterConfig.paperclipApiKey are all empty. Refusing to spawn.`,
+      );
+    }
+    perRunHome = await buildPerRunHermesHome(ctx.runId || "no-run-id", {
+      apiUrl: paperclipClient.base,
+      apiKey: paperclipClient.apiKey,
+      agentId: ctx.agent?.id ?? null,
+      companyId: ctx.agent?.companyId ?? null,
+      issueId: taskId ?? null,
+      runId: ctx.runId ?? null,
+    });
+    env.HERMES_HOME = perRunHome.path;
+    await ctx.onLog(
+      "stdout",
+      `[hermes] MCP tool server enabled; HERMES_HOME=${perRunHome.path} ` +
+        `(scope: agent=${ctx.agent?.id || "?"} issue=${taskId || "none"})\n`,
+    );
+  }
+
+  let result;
+  try {
+    result = await runChildProcess(ctx.runId, hermesCmd, args, {
+      cwd,
+      env,
+      timeoutSec,
+      graceSec,
+      onLog: wrappedOnLog,
+    });
+  } finally {
+    if (perRunHome) {
+      try {
+        await perRunHome.cleanup();
+      } catch (err) {
+        // Cleanup failure is non-fatal — the dir lives under /tmp and
+        // the kernel/OS reaper will eventually clear it. Don't mask
+        // the real run outcome.
+        await ctx.onLog(
+          "stderr",
+          `[hermes] per-run HERMES_HOME cleanup failed (non-fatal): ${
+            (err as Error).message
+          }\n`,
+        );
+      }
+    }
+  }
 
   // ── Parse output ───────────────────────────────────────────────────────
   const parsed = parseHermesOutput(result.stdout || "", result.stderr || "");
