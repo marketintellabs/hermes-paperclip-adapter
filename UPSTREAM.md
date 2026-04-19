@@ -64,12 +64,27 @@ surgical so rebases stay tractable:
    mentions of "error"/"failed" silently skipped adapter-owned status
    reconciliation and Paperclip's continuation retry then reported
    `adapter_failed`.
-6. **Post-run safety-net reconciler** (0.3.2-mil.0): for legacy templates
+6. **Run-context resolution** (0.4.2-mil.0): per-run fields (`taskId`,
+   `taskTitle`, `taskBody`, `commentId`, `wakeReason`, `companyName`,
+   `projectName`, `workspaceDir`) are now resolved from `ctx.context`
+   first, falling back to `ctx.config` for back-compat. Paperclip's
+   `AdapterExecutionContext` actually carries per-run data on
+   `ctx.context` (verified against `@paperclipai/adapter-utils@2026.416.0`);
+   `ctx.config` is the static adapterConfig. Reading the wrong object
+   made `taskId` silently undefined on modern Paperclip, which in turn
+   closed the `adapterOwnedStatus && taskId && paperclipClient.apiKey`
+   gate in `execute.ts` so `preRunClaim` and `reconcileOutcome` became
+   no-ops (MAR-27/MAR-28 regression). The adapter now logs
+   `[hermes] adapter-owned gate: …` and
+   `[hermes] run context provenance: …` before dispatching the run so
+   future gate closures self-diagnose without a DB dig. See
+   `src/server/execute.ts::buildRunContext` + `run-context.test.ts`.
+7. **Post-run safety-net reconciler** (0.3.2-mil.0): for legacy templates
    only, after a successful Hermes exit the adapter GETs the issue and
    PATCHes it to `done` if it is still `todo`/`in_progress`. Closes a
    race with upstream Paperclip's `reconcileStrandedAssignedIssues`
    watchdog.
-7. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+8. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
    tag push.
 
 Everything else is expected to stay in lockstep with upstream.

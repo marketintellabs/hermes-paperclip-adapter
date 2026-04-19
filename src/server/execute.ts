@@ -78,6 +78,94 @@ function cfgStringArray(v: unknown): string[] | undefined {
 }
 
 // ---------------------------------------------------------------------------
+// Run-context field resolution (taskId / taskTitle / wakeReason / …)
+// ---------------------------------------------------------------------------
+//
+// Paperclip's AdapterExecutionContext exposes two sibling bags of data:
+//
+//   - ctx.config  — the agent's adapterConfig (static per-agent settings).
+//   - ctx.context — the per-run context snapshot (per-issue / per-wake data
+//                   such as taskId, issueId, wakeReason, wakeSource, …).
+//
+// Historically this adapter read per-run fields from ctx.config. That was
+// latent-wrong: on modern Paperclip (>= 2026.4, confirmed against
+// @paperclipai/adapter-utils@2026.416.0) the heartbeat service builds
+// `runtimeConfig` from `effectiveResolvedConfig` only, without merging the
+// run context into it, so `ctx.config.taskId` is silently undefined. The
+// effect on legacy templates (builtin:mil-heartbeat) was mild — the LLM
+// fetched its own issue via tools so the empty Mustache {{#taskId}} block
+// was only a usability papercut. On the 0.4.x adapter-owned-status path,
+// however, an empty taskId silently closed the `adapterOwnedStatus &&
+// taskId && paperclipClient.apiKey` gate, so `preRunClaim` and
+// `reconcileOutcome` were both no-ops — which is what caused MAR-27/MAR-28
+// to get escalated to `blocked` even after the LLM emitted RESULT: done.
+//
+// `resolveRunContextField` prefers ctx.context (canonical), falls back to
+// ctx.config (legacy callers), and returns the empty string if neither has
+// it. The returned provenance lets us log exactly where each field came
+// from so future misconfigurations self-diagnose on the next smoke test
+// instead of leaking into a DB dig.
+type FieldProvenance = "context" | "config" | "missing";
+
+export interface ResolvedField {
+  value: string;
+  source: FieldProvenance;
+}
+
+export function resolveRunContextField(
+  ctx: Pick<AdapterExecutionContext, "config" | "context">,
+  key: string,
+): ResolvedField {
+  const fromContext = cfgString((ctx.context as Record<string, unknown> | undefined)?.[key]);
+  if (fromContext) return { value: fromContext, source: "context" };
+  const fromConfig = cfgString((ctx.config as Record<string, unknown> | undefined)?.[key]);
+  if (fromConfig) return { value: fromConfig, source: "config" };
+  return { value: "", source: "missing" };
+}
+
+/**
+ * Snapshot of all per-run fields the adapter currently consumes. Produced
+ * once at the top of {@link execute} and threaded through prompt-building,
+ * preRunClaim, reconcileOutcome, and diagnostic logging so the adapter
+ * reads each field from the canonical place exactly once.
+ */
+export interface RunContext {
+  taskId: string;
+  taskTitle: string;
+  taskBody: string;
+  commentId: string;
+  wakeReason: string;
+  companyName: string;
+  projectName: string;
+  workspaceDir: string;
+  /**
+   * Per-field provenance. Keys match the fields above. Used by the
+   * `[hermes] run context:` diagnostic log line.
+   */
+  provenance: Record<string, FieldProvenance>;
+}
+
+export function buildRunContext(ctx: AdapterExecutionContext): RunContext {
+  const fields: Array<keyof Omit<RunContext, "provenance">> = [
+    "taskId",
+    "taskTitle",
+    "taskBody",
+    "commentId",
+    "wakeReason",
+    "companyName",
+    "projectName",
+    "workspaceDir",
+  ];
+  const out: Partial<RunContext> = { provenance: {} };
+  for (const f of fields) {
+    const r = resolveRunContextField(ctx, f);
+    (out as Record<string, unknown>)[f] = r.value;
+    out.provenance![f] = r.source;
+  }
+  return out as RunContext;
+}
+
+// ---------------------------------------------------------------------------
 // Wake-up prompt builder
 // ---------------------------------------------------------------------------
 
@@ -193,18 +281,19 @@ interface BuiltPrompt {
 function buildPrompt(
   ctx: AdapterExecutionContext,
   config: Record<string, unknown>,
+  run: RunContext,
 ): BuiltPrompt {
   const resolved = resolvePromptTemplate(cfgString(config.promptTemplate));
   const template = resolved.text;
 
-  const taskId = cfgString(ctx.config?.taskId);
-  const taskTitle = cfgString(ctx.config?.taskTitle) || "";
-  const taskBody = cfgString(ctx.config?.taskBody) || "";
-  const commentId = cfgString(ctx.config?.commentId) || "";
-  const wakeReason = cfgString(ctx.config?.wakeReason) || "";
+  const taskId = run.taskId;
+  const taskTitle = run.taskTitle;
+  const taskBody = run.taskBody;
+  const commentId = run.commentId;
+  const wakeReason = run.wakeReason;
   const agentName = ctx.agent?.name || "Hermes Agent";
-  const companyName = cfgString(ctx.config?.companyName) || "";
-  const projectName = cfgString(ctx.config?.projectName) || "";
+  const companyName = run.companyName;
+  const projectName = run.projectName;
 
   // Build API URL — ensure it has the /api path
   let paperclipApiUrl =
@@ -788,8 +877,16 @@ export async function execute(
     model,
   });
 
+  // ── Resolve per-run context once (canonical source for all fields) ─────
+  // See `resolveRunContextField` for the rationale: Paperclip puts per-run
+  // data on ctx.context, not ctx.config. We resolve once here and thread
+  // the snapshot through prompt-building, env wiring, preRunClaim, and
+  // reconcileOutcome so no downstream reader silently re-reads the wrong
+  // bag.
+  const run = buildRunContext(ctx);
+
   // ── Build prompt ───────────────────────────────────────────────────────
-  const prompt = buildPrompt(ctx, config);
+  const prompt = buildPrompt(ctx, config, run);
   const adapterOwnedStatus =
     prompt.builtinName !== null &&
     ADAPTER_OWNED_STATUS_TEMPLATES.has(prompt.builtinName);
@@ -854,7 +951,7 @@ export async function execute(
   if (ctx.runId) env.PAPERCLIP_RUN_ID = ctx.runId;
   if ((ctx as any).authToken && !env.PAPERCLIP_API_KEY)
     env.PAPERCLIP_API_KEY = (ctx as any).authToken;
-  const taskId = cfgString(ctx.config?.taskId);
+  const taskId = run.taskId;
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
   const userEnv = config.env as Record<string, string> | undefined;
@@ -863,8 +960,10 @@ export async function execute(
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
-  const cwd =
-    cfgString(config.cwd) || cfgString(ctx.config?.workspaceDir) || ".";
+  // `config.cwd` is adapterConfig.cwd (static). `run.workspaceDir` is the
+  // per-run workspace (ctx.context.workspaceDir with ctx.config.workspaceDir
+  // fallback for legacy callers).
+  const cwd = cfgString(config.cwd) || run.workspaceDir || ".";
   try {
     await ensureAbsoluteDirectory(cwd);
   } catch {
@@ -908,6 +1007,27 @@ export async function execute(
 
   // ── Build Paperclip API client (used for pre-run claim + post-run) ─────
   const paperclipClient = buildPaperclipClient(ctx, config, env);
+
+  // Self-diagnostic: the adapter-owned-status path has three gates
+  // (`adapterOwnedStatus && taskId && paperclipClient.apiKey`). If any one
+  // closes silently, both preRunClaim and reconcileOutcome become no-ops
+  // and the issue gets escalated to `blocked` by Paperclip's reconciler
+  // (see MAR-27/MAR-28 regressions). Log the gate state AND the provenance
+  // of each run-context field so the next failure self-diagnoses without
+  // a DB dig.
+  const provenanceSummary = Object.entries(run.provenance)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(" ");
+  await ctx.onLog(
+    "stdout",
+    `[hermes] adapter-owned gate: adapterOwnedStatus=${adapterOwnedStatus} ` +
+      `taskId=${taskId ? "set" : "missing"} ` +
+      `apiKey=${paperclipClient.apiKey ? "set" : "missing"}\n`,
+  );
+  await ctx.onLog(
+    "stdout",
+    `[hermes] run context provenance: ${provenanceSummary}\n`,
+  );
 
   // ── Pre-run claim (adapter-owned-status templates only) ────────────────
   // For legacy templates, the LLM still handles PATCH status=in_progress
