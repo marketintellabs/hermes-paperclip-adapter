@@ -1098,6 +1098,16 @@ export async function execute(
       runId: ctx.runId ?? null,
     });
     env.HERMES_HOME = perRunHome.path;
+    // Belt-and-suspenders: propagate telemetry paths via process env too, not
+    // just through config.yaml's `mcp_servers.paperclip.env`. Hermes passes
+    // parent env to its MCP subprocesses via normal inheritance, but we've
+    // observed it does NOT forward the per-server `env` block from
+    // config.yaml (only e.g. PAPERCLIP_ISSUE_ID that paperclip itself sets on
+    // the adapter process). Without this, the MCP server starts with
+    // PAPERCLIP_MCP_AUDIT_LOG undefined and the NDJSON file is never written
+    // → execute.ts sees an empty audit and resultJson.toolCalls stays empty.
+    env.PAPERCLIP_MCP_AUDIT_LOG = perRunHome.auditLogPath;
+    env.PAPERCLIP_MCP_LIVENESS_FILE = perRunHome.livenessFilePath;
     await ctx.onLog(
       "stdout",
       `[hermes] MCP tool server enabled; HERMES_HOME=${perRunHome.path} ` +
