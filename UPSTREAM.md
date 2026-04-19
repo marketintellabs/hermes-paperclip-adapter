@@ -100,17 +100,65 @@ surgical so rebases stay tractable:
    `sessions`/`skills`/`.env` from the real home (preserving session
    resume + skill discovery) but writes a fresh `config.yaml` carrying
    this run's `mcp_servers.paperclip` block with the JWT + scope env.
-   Cleanup runs in `finally`. Implementation in `src/mcp/` and
-   `src/server/hermes-home.ts`; test coverage: 46 tests across 11
-   suites. Rationale: runs are scope-distinct and multiple agents
-   share a department container, so a shared `~/.hermes/config.yaml`
-   would race — per-run `HERMES_HOME` is the clean isolation model.
-   Also bumps Node `engines` to `>=24` to match the Node 24 LTS image,
-   TypeScript to `^6.0.0`, and adds `yaml@^2.8` for the config
-   generator. See [`docs/ADAPTER_REDESIGN.md`](https://github.com/marketintellabs/marketintellabs/blob/main/docs/ADAPTER_REDESIGN.md)
+   Cleanup runs in `finally`.    Implementation in `src/mcp/` and
+   `src/server/hermes-home.ts`. Rationale: runs are scope-distinct and
+   multiple agents share a department container, so a shared
+   `~/.hermes/config.yaml` would race — per-run `HERMES_HOME` is the
+   clean isolation model. Also bumps Node `engines` to `>=24` to match
+   the Node 24 LTS image, TypeScript to `^6.0.0`, and adds `yaml@^2.8`
+   for the config generator. See
+   [`docs/ADAPTER_REDESIGN.md`](https://github.com/marketintellabs/marketintellabs/blob/main/docs/ADAPTER_REDESIGN.md)
    (in the MIL infra repo) §"Phase B" for the full design record.
-9. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
-   tag push.
+9. **MCP hardening** (0.8.0-mil.0): observability + trust + reliability
+   pass on the 0.7.0 tool plane. Adds the `update_issue_status` tool
+   (scope-enforced against `PAPERCLIP_ISSUE_ID`) so the LLM can
+   transition an issue through a structured call instead of a
+   `RESULT:` marker; writes a per-call NDJSON audit log to
+   `$HERMES_HOME/mcp-tool-calls.ndjson` that `execute.ts` folds into
+   `resultJson.toolCalls` / `toolCallCount` / `toolErrorCount`; adds a
+   post-run stdout/stderr bypass detector that flips
+   `errorCode: tool_bypass_attempt` when the LLM tried to `curl
+   localhost:3100/api/issues/...` instead of using a tool; writes an
+   MCP subprocess PID file at startup and removes it on clean exit so
+   `execute.ts` can detect a stale PID and flip
+   `errorCode: tool_server_died`. The `mil-heartbeat-v3` template is
+   updated to prefer `update_issue_status` over the `RESULT:` marker
+   (marker stays as a structured fallback). Implementation in
+   `src/mcp/server.ts`, `src/mcp/tools/update-issue-status.ts`,
+   `src/server/mcp-telemetry.ts`, `src/server/bypass-detector.ts`.
+10. **MCP env-propagation fix** (0.8.1-mil.0): Hermes inherits process
+    env into its stdio MCP subprocesses but does **not** forward the
+    per-server `env` block from `config.yaml` (only a hard-coded
+    allow-list like `PAPERCLIP_ISSUE_ID` that Paperclip itself sets).
+    Without intervention, `PAPERCLIP_MCP_AUDIT_LOG` /
+    `PAPERCLIP_MCP_LIVENESS_FILE` resolved to `undefined` inside the
+    MCP server and the NDJSON + liveness files were never written, so
+    every 0.8.0 run reported `toolCallCount=0`, `audit=false`,
+    `liveness=false` regardless of what the LLM actually did.
+    `execute.ts` now sets both env vars directly on the Hermes child
+    process env so they propagate via normal inheritance. Fix verified
+    against MAR-30 heartbeat telemetry.
+11. **Session-id poisoning guard** (0.8.2-mil.0): the legacy
+    non-quiet-mode `SESSION_ID_REGEX_LEGACY` used to be
+    `/session[_ ](?:id|saved)[:\s]+([a-zA-Z0-9_-]+)/i`, which
+    false-matched the phrase `"session ID from"` in Hermes' own
+    resume-failure prose (`"Session not found: from\nUse a session ID
+    from a previous CLI run."`) and captured the literal word `"from"`
+    as a session id. The adapter returned it, Paperclip persisted it
+    as `session_id_after`, the next heartbeat replayed
+    `--resume from`, Hermes crashed, the adapter re-extracted
+    `"from"` — infinite crash loop. Fix is defense-in-depth: anchor
+    the legacy regex to `session_id:` / `session saved:` with a
+    mandatory colon, shape-validate every captured token via the new
+    `isPlausibleSessionId` helper (min length 8, must contain a
+    digit/hyphen/underscore — rejects `"from"`, `"session"`, etc.),
+    and skip session-id extraction entirely when the output contains
+    `"Session not found"` or `"Use a session ID from a previous CLI
+    run"`. Nine new tests in `parse-hermes-output.test.ts` pin the
+    regression. Incident reference: MAR-30 Marcus heartbeat crash
+    loop, 2026-04-19.
+12. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+    tag push.
 
 Everything else is expected to stay in lockstep with upstream.
 
