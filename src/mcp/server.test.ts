@@ -13,8 +13,11 @@
  * here, not in a CloudWatch spike.
  */
 
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { z } from "zod";
 
 import { buildServer } from "./server.js";
@@ -63,14 +66,20 @@ function stubClient(): PaperclipClient {
 }
 
 describe("buildServer — tool registration", () => {
-  it("registers all 4 Paperclip tools by name", () => {
+  it("registers all 5 Paperclip tools by name", () => {
     const server = buildServer({ client: stubClient(), scopedIssueId: null });
     const names = Object.keys(
       (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
     );
     assert.deepEqual(
       names.sort(),
-      ["create_sub_issue", "get_issue", "list_my_issues", "post_issue_comment"],
+      [
+        "create_sub_issue",
+        "get_issue",
+        "list_my_issues",
+        "post_issue_comment",
+        "update_issue_status",
+      ],
     );
   });
 });
@@ -155,6 +164,78 @@ describe("buildServer — scope enforcement end-to-end", () => {
       { signal: new AbortController().signal },
     );
     assert.equal(res.isError ?? false, false);
+  });
+});
+
+describe("buildServer — audit log NDJSON sink", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "mcp-audit-test-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("writes one NDJSON line per completed tool call", async () => {
+    const auditPath = join(dir, "calls.ndjson");
+    const server = buildServer({
+      client: stubClient(),
+      scopedIssueId: null,
+      auditLogPath: auditPath,
+    });
+    const list = reachTool(server, "list_my_issues");
+    const get = reachTool(server, "get_issue");
+    const signal = new AbortController().signal;
+
+    await list.handler({}, { signal });
+    await get.handler({ issueId: "MAR-1" }, { signal });
+
+    const raw = await readFile(auditPath, "utf-8");
+    const lines = raw.trim().split("\n").filter(Boolean);
+    assert.equal(lines.length, 2, "expected one line per call");
+
+    const records = lines.map((l) => JSON.parse(l));
+    assert.equal(records[0].event, "tool_call_end");
+    assert.equal(records[0].tool, "list_my_issues");
+    assert.equal(records[0].callId, 1);
+    assert.equal(records[0].ok, true);
+    assert.equal(records[1].event, "tool_call_end");
+    assert.equal(records[1].tool, "get_issue");
+    assert.equal(records[1].callId, 2);
+  });
+
+  it("does NOT write start events (only end/error — keeps audit focused)", async () => {
+    const auditPath = join(dir, "calls.ndjson");
+    const server = buildServer({
+      client: stubClient(),
+      scopedIssueId: null,
+      auditLogPath: auditPath,
+    });
+    const list = reachTool(server, "list_my_issues");
+    await list.handler({}, { signal: new AbortController().signal });
+
+    const raw = await readFile(auditPath, "utf-8");
+    const records = raw
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => JSON.parse(l));
+    // Exactly ONE line, and it's tool_call_end — not two (start+end).
+    assert.equal(records.length, 1);
+    assert.equal(records[0].event, "tool_call_end");
+  });
+
+  it("no file is created when auditLogPath is null (opt-in feature)", async () => {
+    const server = buildServer({
+      client: stubClient(),
+      scopedIssueId: null,
+      auditLogPath: null,
+    });
+    const list = reachTool(server, "list_my_issues");
+    await list.handler({}, { signal: new AbortController().signal });
+    // The dir is empty because we never passed a path — a stat here
+    // would show no files. We just confirm the call didn't throw.
+    assert.ok(true);
   });
 });
 

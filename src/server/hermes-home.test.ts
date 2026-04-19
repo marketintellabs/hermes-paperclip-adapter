@@ -84,6 +84,30 @@ describe("buildMcpServerSpec", () => {
     assert.deepEqual(spec.args, [MCP_CLI]);
     assert.equal(spec.enabled, true);
   });
+
+  it("injects telemetry paths into env when provided (audit + liveness)", () => {
+    const spec = buildMcpServerSpec(
+      { apiUrl: "http://pc/api", apiKey: "jwt" },
+      MCP_CLI,
+      {
+        auditLogPath: "/tmp/run-x/mcp-tool-calls.ndjson",
+        livenessFilePath: "/tmp/run-x/mcp-liveness.json",
+      },
+    );
+    const env = (spec as { env: Record<string, string> }).env;
+    assert.equal(env.PAPERCLIP_MCP_AUDIT_LOG, "/tmp/run-x/mcp-tool-calls.ndjson");
+    assert.equal(env.PAPERCLIP_MCP_LIVENESS_FILE, "/tmp/run-x/mcp-liveness.json");
+  });
+
+  it("omits telemetry env vars when telemetry paths are absent (backwards compat)", () => {
+    const spec = buildMcpServerSpec(
+      { apiUrl: "x", apiKey: "y" },
+      MCP_CLI,
+    );
+    const env = (spec as { env: Record<string, string> }).env;
+    assert.equal(env.PAPERCLIP_MCP_AUDIT_LOG, undefined);
+    assert.equal(env.PAPERCLIP_MCP_LIVENESS_FILE, undefined);
+  });
 });
 
 describe("mergeMcpServerIntoConfig", () => {
