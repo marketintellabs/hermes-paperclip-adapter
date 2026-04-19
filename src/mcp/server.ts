@@ -4,9 +4,12 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { createClient, type PaperclipClient } from "./client.js";
 import { ALL_TOOLS } from "./tools/index.js";
 import { ScopeViolation, type ToolContext } from "./tools/types.js";
+import { ADAPTER_VERSION } from "../shared/version.js";
 
 const SERVER_NAME = "paperclip";
-const SERVER_VERSION = "0.8.3-mil.0";
+// Re-exported as `SERVER_VERSION` for backwards compatibility with
+// existing imports; canonical source is `shared/version.ts`.
+export const SERVER_VERSION = ADAPTER_VERSION;
 
 /**
  * Hard cap on tool calls per run, enforced inside the MCP server

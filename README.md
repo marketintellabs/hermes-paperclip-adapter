@@ -76,6 +76,16 @@ issues from Hermes-side env filtering issues without ECS Exec. The
 belt-and-suspenders process-env write from 0.8.1 is removed (it never
 worked — see the 0.8.1 note above).
 
+**0.8.4-mil.0 — adapter version in resultJson:** every run now records
+`resultJson.adapterVersion` (pulled from the new canonical
+`src/shared/version.ts`) so dashboards, the runbook, and incident
+forensics can tell at a glance which adapter produced a given run.
+Critical during rollouts and hot-patches where the deployed adapter
+version is the first thing you need to know and `stderr_excerpt` is
+often truncated past the startup banner. The MCP server banner
+(`[paperclip-mcp] server paperclip@<version> connected …`) now reads
+from the same source.
+
 **0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
 `--resume <id>` names an unknown session it prints
 `"Use a session ID from a previous CLI run"`. The legacy non-quiet
@@ -95,7 +105,7 @@ Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
 back. The 0.8.x hardening only kicks in on v3 runs. See the
 [fork divergence list](./UPSTREAM.md#divergence-from-upstream)
-(items 8–12) for the implementation sketch.
+(items 8–13) for the implementation sketch.
 
 ## MIL-specific features
 

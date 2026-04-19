@@ -52,6 +52,7 @@ import { buildPerRunHermesHome } from "./hermes-home.js";
 import type { PerRunHermesHome } from "./hermes-home.js";
 import { collectMcpTelemetry, type McpTelemetry } from "./mcp-telemetry.js";
 import { scanForBypass } from "./bypass-detector.js";
+import { ADAPTER_VERSION } from "../shared/version.js";
 
 import {
   detectModel,
@@ -1309,7 +1310,12 @@ export async function execute(
   }
 
   // Set resultJson so Paperclip can persist run metadata (used for UI display + auto-comments).
+  // `adapterVersion` is always included so dashboards / the runbook can
+  // tell at a glance which version of the adapter produced a run —
+  // critical during rollouts, hot-patches, and incident forensics where
+  // stderr_excerpt may be truncated.
   const resultJson: Record<string, unknown> = {
+    adapterVersion: ADAPTER_VERSION,
     result: cleanedResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,

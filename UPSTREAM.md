@@ -173,7 +173,16 @@ surgical so rebases stay tractable:
     comment explaining why, to keep future maintainers from
     re-adding them. Six new tests in `parse-hermes-output.test.ts`
     cover `resolveResumeSessionId`.
-13. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
+13. **`adapterVersion` in resultJson** (0.8.4-mil.0): every run records
+    the adapter version into `resultJson.adapterVersion`, sourced from
+    a new canonical `src/shared/version.ts` that both the MCP server
+    banner and `execute.ts` import from. Needed during rollouts and
+    hot-patches to tell at a glance which adapter produced a given
+    run — `stderr_excerpt` is truncated past the MCP startup banner in
+    most Paperclip runs, so the banner version was effectively
+    invisible. Zero-risk addition (pure read), no changes to existing
+    fields.
+14. **Release workflow**: `.github/workflows/release.yml` publishes to npm on
     tag push.
 
 Everything else is expected to stay in lockstep with upstream.
