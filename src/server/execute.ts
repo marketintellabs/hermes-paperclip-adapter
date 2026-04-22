@@ -53,6 +53,7 @@ import type { PerRunHermesHome } from "./hermes-home.js";
 import { collectMcpTelemetry, type McpTelemetry } from "./mcp-telemetry.js";
 import { scanForBypass } from "./bypass-detector.js";
 import { sessionExistsInHermesDb, resolveRealHermesHome } from "./session-probe.js";
+import { preflightAssignedWork } from "./preflight.js";
 import { ADAPTER_VERSION } from "../shared/version.js";
 
 import {
@@ -1176,6 +1177,62 @@ export async function execute(
 
   // ── Build Paperclip API client (used for pre-run claim + post-run) ─────
   const paperclipClient = buildPaperclipClient(ctx, config, env);
+
+  // ── Pre-flight: is there any work to do? ───────────────────────────────
+  // Avoid spawning Hermes (and burning an LLM turn) when this agent has
+  // no taskId, no comment event, AND no open assigned issues. See
+  // `preflight.ts` for the policy (fail-open on every ambiguous answer).
+  //
+  // Opt-out via adapterConfig.preflightSkip=false (default true). This is
+  // here as a belt-and-suspenders in case the API check is somehow
+  // breaking a legitimate wake path in production; operators can turn it
+  // off per-agent without a new release.
+  const preflightEnabled = cfgBoolean(config.preflightSkip) !== false;
+  if (preflightEnabled) {
+    const decision = await preflightAssignedWork({
+      taskId: run.taskId,
+      commentId: run.commentId,
+      apiBase: paperclipClient.base,
+      apiKey: paperclipClient.apiKey,
+      agentId: ctx.agent?.id,
+      companyId: ctx.agent?.companyId,
+      wakeReason: run.wakeReason,
+    });
+
+    await ctx.onLog(
+      "stdout",
+      `[hermes] preflight: action=${decision.action} reason=${decision.reason}` +
+        (decision.openIssueCount !== null
+          ? ` openIssueCount=${decision.openIssueCount}`
+          : "") +
+        "\n",
+    );
+
+    if (decision.action === "skip") {
+      await ctx.onLog(
+        "stdout",
+        `[hermes] No assigned work for ${ctx.agent?.name ?? "agent"}; ` +
+          `skipping Hermes invocation (zero LLM cost).\n`,
+      );
+      const skippedResult: AdapterExecutionResult = {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        provider: resolvedProvider,
+        model,
+        summary:
+          `No assigned work for this agent; skipped Hermes invocation ` +
+          `(preflight: ${decision.reason}).`,
+        resultJson: {
+          adapterVersion: ADAPTER_VERSION,
+          preflight: "skipped",
+          preflight_reason: decision.reason,
+          preflight_open_issue_count: decision.openIssueCount,
+        },
+      };
+      return skippedResult;
+    }
+  }
 
   // Self-diagnostic: the adapter-owned-status path has three gates
   // (`adapterOwnedStatus && taskId && paperclipClient.apiKey`). If any one
