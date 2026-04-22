@@ -337,27 +337,45 @@ describe("create_sub_issue", () => {
     assert.equal(body.priority, 2);
   });
 
-  it("allows top-level (parentless) creation — delegation without chaining", async () => {
-    // New top-level work is a valid delegation pattern. The scope guard
-    // only fires when parentIssueId is set to an issue other than the
-    // caller's own. Lose this and agents can't spin off unrelated work.
-    const { client, calls } = fakeClient(
-      { companyId: "co-1" },
-      { "POST /companies/co-1/issues": { id: "new-issue" } },
-    );
-    const { ctx } = fakeCtx(client, "MAR-30");
+  it("REJECTS parentless creation — agents can't create top-level work", async () => {
+    // Structural invariant (0.8.7+): every sub-issue must trace back to a
+    // board-originated root via its parent. An LLM passing "" (or
+    // omitting the field, which zod now rejects at the type layer but
+    // we also guard inside execute) gets fix-args without hitting the
+    // API — see create-sub-issue.ts for why this closes the
+    // 2026-04-04 "CEO fabricates 49 investigations" regression.
+    const { client, calls } = fakeClient({ companyId: "co-1" }, {});
+    const { ctx, logs } = fakeCtx(client, "MAR-30");
     const result = await createSubIssueTool.execute(
       {
         title: "New standalone",
         description: "go",
         assigneeAgentId: "ag-other",
+        parentIssueId: "",
       },
       ctx,
     );
-    assert.equal(result.isError, undefined);
-    assert.equal(calls.length, 1);
-    const body = calls[0].body as Record<string, unknown>;
-    assert.equal(body.parentIssueId, undefined);
+    assert.equal(result.isError, true);
+    assert.equal(result.retryPolicy, "fix-args");
+    assert.equal(calls.length, 0);
+    assert.equal(logs[0]?.msg, "create_sub_issue MISSING_PARENT");
+  });
+
+  it("REJECTS whitespace-only parentIssueId", async () => {
+    const { client, calls } = fakeClient({ companyId: "co-1" }, {});
+    const { ctx } = fakeCtx(client, "MAR-30");
+    const result = await createSubIssueTool.execute(
+      {
+        title: "t",
+        description: "d",
+        assigneeAgentId: "ag-other",
+        parentIssueId: "   ",
+      },
+      ctx,
+    );
+    assert.equal(result.isError, true);
+    assert.equal(result.retryPolicy, "fix-args");
+    assert.equal(calls.length, 0);
   });
 
   it("SCOPE VIOLATION: rejects parentIssueId that isn't the bound issue", async () => {
@@ -382,7 +400,7 @@ describe("create_sub_issue", () => {
     const { client } = fakeClient({}, {});
     const { ctx } = fakeCtx(client);
     const result = await createSubIssueTool.execute(
-      { title: "t", description: "d", assigneeAgentId: "ag" },
+      { title: "t", description: "d", assigneeAgentId: "ag", parentIssueId: "MAR-30" },
       ctx,
     );
     assert.equal(result.isError, true);

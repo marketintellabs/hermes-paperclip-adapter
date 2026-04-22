@@ -52,6 +52,19 @@ export interface PaperclipMcpScope {
   companyId?: string | null;
   issueId?: string | null;
   runId?: string | null;
+  /**
+   * Per-agent MCP tool allowlist. When set, the MCP server registers
+   * only these tools (see `src/mcp/server.ts` resolveToolsToRegister).
+   * Passed through to the MCP subprocess as the
+   * `PAPERCLIP_MCP_TOOLS=<comma,separated>` env var; Hermes' own safe-env
+   * filter strips most of the parent env, so we have to bake this into
+   * the config.yaml mcp_servers.paperclip.env block explicitly.
+   *
+   * `null` / `undefined` = no allowlist (register every tool, 0.8.6
+   * backward-compatible behaviour). `[]` = register nothing (valid but
+   * pointless; ops use case is "read-only audit agent").
+   */
+  allowedTools?: readonly string[] | null;
 }
 
 export interface PerRunHermesHome {
@@ -121,6 +134,13 @@ export function buildMcpServerSpec(
   if (scope.runId) env.PAPERCLIP_RUN_ID = scope.runId;
   if (telemetry.auditLogPath) env.PAPERCLIP_MCP_AUDIT_LOG = telemetry.auditLogPath;
   if (telemetry.livenessFilePath) env.PAPERCLIP_MCP_LIVENESS_FILE = telemetry.livenessFilePath;
+  // Per-agent MCP tool allowlist. Serialized as a comma-separated list
+  // because the MCP subprocess reads a single env var. We only emit
+  // the var when allowedTools is an array — leaving it unset means
+  // "register every tool" in the MCP server.
+  if (Array.isArray(scope.allowedTools)) {
+    env.PAPERCLIP_MCP_TOOLS = scope.allowedTools.join(",");
+  }
 
   return {
     command: "node",
