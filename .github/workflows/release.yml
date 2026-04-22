@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
@@ -50,3 +50,27 @@ jobs:
           else
             npm publish --access public --provenance
           fi
+
+      # Create a GitHub Release on every tag push so the npmjs.com
+      # "Version history" panel shows release notes (npm pulls them
+      # from the repository's Releases, not from CHANGELOG or tags).
+      # Skipped on workflow_dispatch since there's no tag to attach to.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # If somebody pre-created the release manually (e.g. backfill),
+          # don't fail the workflow — just log and move on.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — leaving it alone."
+            exit 0
+          fi
+          # --generate-notes fills in the body from merged PRs / commits
+          # since the previous tag. Maintainers can edit the release
+          # afterwards to add a highlights section.
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag

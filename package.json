@@ -42,6 +42,7 @@
     "templates",
     "README.md",
     "UPSTREAM.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
