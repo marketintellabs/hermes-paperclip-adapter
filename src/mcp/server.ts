@@ -46,6 +46,79 @@ export interface BuildOptions {
    * the stderr log line (same as 0.7.x behaviour).
    */
   auditLogPath?: string | null;
+  /**
+   * Per-agent tool allowlist. When provided (typically from the
+   * PAPERCLIP_MCP_TOOLS env var baked into the per-run config.yaml by
+   * the adapter), only tools whose `name` appears in this list are
+   * registered. When null/undefined, every tool in `ALL_TOOLS` is
+   * registered (backward compatible).
+   *
+   * Rationale: agents that don't need to decompose work (individual
+   * publishers, research analysts, etc.) get a read-only-ish set —
+   * `list_my_issues`, `get_issue`, `post_issue_comment`,
+   * `update_issue_status`. Heads and the CEO keep `create_sub_issue`
+   * so they can delegate within their assigned tree. See
+   * paperclip/company-template.json for the canonical allowlist per
+   * agent.
+   *
+   * Names not found in `ALL_TOOLS` are logged and skipped (not an
+   * error; tolerates renames / template drift).
+   */
+  allowedTools?: readonly string[] | null;
+}
+
+/**
+ * Parse a comma-separated `PAPERCLIP_MCP_TOOLS` env value into a clean
+ * allowlist.
+ *
+ *   unset / null      → null  ("no allowlist configured, register all")
+ *   empty / blank     → []    ("explicit deny-all, register none")
+ *   "a,b,c"           → ["a", "b", "c"]
+ *
+ * Distinguishing these three is important: `process.env.FOO` is
+ * `undefined` when unset but `""` when explicitly set to empty, and
+ * `buildMcpServerSpec` relies on that to propagate a deny-all config
+ * through to the subprocess without falling back to register-all.
+ *
+ * Exported for unit tests.
+ */
+export function parseAllowedToolsEnv(raw: string | undefined | null): readonly string[] | null {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return [];
+  return trimmed
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Filter {@link ALL_TOOLS} against a per-agent allowlist. When the
+ * allowlist is null/undefined we register everything (backward
+ * compatible default). When it's empty-after-parsing we register
+ * nothing but still boot the server — the LLM will get "tool not
+ * registered" errors on any call, which is the explicit intent of an
+ * operator who wrote `paperclipMcpTools: []`.
+ *
+ * Unknown names are logged to stderr and skipped. A typo in the
+ * company template shouldn't prevent a department container from
+ * booting.
+ *
+ * Exported for unit tests.
+ */
+export function resolveToolsToRegister(
+  allowed: readonly string[] | null | undefined,
+): typeof ALL_TOOLS[number][] {
+  if (!allowed) return [...ALL_TOOLS];
+  const allowedSet = new Set(allowed);
+  const known = new Set(ALL_TOOLS.map((t) => t.name));
+  const unknownNames = [...allowedSet].filter((n) => !known.has(n));
+  if (unknownNames.length > 0) {
+    process.stderr.write(
+      `[paperclip-mcp] allowlist names not recognized (will be ignored): ${unknownNames.join(", ")}\n`,
+    );
+  }
+  return ALL_TOOLS.filter((t) => allowedSet.has(t.name));
 }
 
 /**
@@ -66,9 +139,18 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     opts.auditLogPath !== undefined
       ? opts.auditLogPath
       : (process.env.PAPERCLIP_MCP_AUDIT_LOG ?? null);
+  const allowedTools =
+    opts.allowedTools !== undefined
+      ? opts.allowedTools
+      : parseAllowedToolsEnv(process.env.PAPERCLIP_MCP_TOOLS);
 
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
   let callCount = 0;
+
+  // Resolve which tools to register. When the agent has an allowlist,
+  // filter ALL_TOOLS to only those entries — unknown names log and skip
+  // so a typo in the template doesn't take the whole MCP server down.
+  const toolsToRegister = resolveToolsToRegister(allowedTools);
 
   const writeLog = (event: string, meta: Record<string, unknown>) => {
     const record = {
@@ -114,7 +196,7 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     },
   };
 
-  for (const tool of ALL_TOOLS) {
+  for (const tool of toolsToRegister) {
     server.registerTool(
       tool.name,
       {

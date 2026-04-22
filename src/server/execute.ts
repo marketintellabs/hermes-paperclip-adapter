@@ -1306,6 +1306,12 @@ export async function execute(
           `adapterConfig.paperclipApiKey are all empty. Refusing to spawn.`,
       );
     }
+    // Per-agent MCP tool allowlist from adapterConfig. When absent,
+    // the MCP server registers every tool in ALL_TOOLS (backward
+    // compatible). See paperclip/company-template.json for the canonical
+    // per-agent lists.
+    const paperclipMcpTools = cfgStringArray(config.paperclipMcpTools);
+
     perRunHome = await buildPerRunHermesHome(ctx.runId || "no-run-id", {
       apiUrl: paperclipClient.base,
       apiKey: paperclipClient.apiKey,
@@ -1313,6 +1319,7 @@ export async function execute(
       companyId: ctx.agent?.companyId ?? null,
       issueId: taskId ?? null,
       runId: ctx.runId ?? null,
+      allowedTools: paperclipMcpTools ?? null,
     });
     env.HERMES_HOME = perRunHome.path;
     // Note: setting telemetry vars on the adapter's own env does NOT help —
@@ -1326,7 +1333,11 @@ export async function execute(
     await ctx.onLog(
       "stdout",
       `[hermes] MCP tool server enabled; HERMES_HOME=${perRunHome.path} ` +
-        `(scope: agent=${ctx.agent?.id || "?"} issue=${taskId || "none"})\n`,
+        `(scope: agent=${ctx.agent?.id || "?"} issue=${taskId || "none"}` +
+        (paperclipMcpTools
+          ? ` tools=[${paperclipMcpTools.join(",")}]`
+          : " tools=<all>") +
+        `)\n`,
     );
     // Diagnostic: surface the presence of telemetry keys in the per-run
     // config.yaml so we can tell at a glance whether the env block got

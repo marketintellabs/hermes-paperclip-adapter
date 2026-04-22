@@ -108,6 +108,44 @@ describe("buildMcpServerSpec", () => {
     assert.equal(env.PAPERCLIP_MCP_AUDIT_LOG, undefined);
     assert.equal(env.PAPERCLIP_MCP_LIVENESS_FILE, undefined);
   });
+
+  it("emits PAPERCLIP_MCP_TOOLS (comma-separated) when allowedTools is set", () => {
+    const spec = buildMcpServerSpec(
+      {
+        apiUrl: "http://pc/api",
+        apiKey: "jwt",
+        allowedTools: ["list_my_issues", "get_issue", "post_issue_comment"],
+      },
+      MCP_CLI,
+    );
+    const env = (spec as { env: Record<string, string> }).env;
+    assert.equal(
+      env.PAPERCLIP_MCP_TOOLS,
+      "list_my_issues,get_issue,post_issue_comment",
+    );
+  });
+
+  it("emits an empty PAPERCLIP_MCP_TOOLS when allowedTools is [] (deny-all)", () => {
+    // Empty array = explicit deny-all, different from "no allowlist".
+    // We must still set the env var so the MCP server sees an empty
+    // allowlist (not null), otherwise the subprocess falls through to
+    // "register all tools".
+    const spec = buildMcpServerSpec(
+      { apiUrl: "http://pc/api", apiKey: "jwt", allowedTools: [] },
+      MCP_CLI,
+    );
+    const env = (spec as { env: Record<string, string> }).env;
+    assert.equal(env.PAPERCLIP_MCP_TOOLS, "");
+  });
+
+  it("omits PAPERCLIP_MCP_TOOLS entirely when allowedTools is undefined", () => {
+    const spec = buildMcpServerSpec(
+      { apiUrl: "http://pc/api", apiKey: "jwt" },
+      MCP_CLI,
+    );
+    const env = (spec as { env: Record<string, string> }).env;
+    assert.equal(env.PAPERCLIP_MCP_TOOLS, undefined);
+  });
 });
 
 describe("mergeMcpServerIntoConfig", () => {

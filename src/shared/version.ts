@@ -9,4 +9,4 @@
  * Keep in sync with `package.json` on every release. The release workflow
  * checks this at publish time (see `.github/workflows/release.yml`).
  */
-export const ADAPTER_VERSION = "0.8.7-mil.0";
+export const ADAPTER_VERSION = "0.8.8-mil.0";

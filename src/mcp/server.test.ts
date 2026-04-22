@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 
-import { buildServer } from "./server.js";
+import { buildServer, parseAllowedToolsEnv, resolveToolsToRegister } from "./server.js";
 import type { PaperclipClient, PaperclipConfig } from "./client.js";
 
 /**
@@ -81,6 +81,75 @@ describe("buildServer — tool registration", () => {
         "update_issue_status",
       ],
     );
+  });
+
+  it("honors a per-agent allowlist — only listed tools are registered", () => {
+    const server = buildServer({
+      client: stubClient(),
+      scopedIssueId: null,
+      allowedTools: ["list_my_issues", "get_issue", "post_issue_comment", "update_issue_status"],
+    });
+    const names = Object.keys(
+      (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
+    );
+    assert.deepEqual(
+      names.sort(),
+      ["get_issue", "list_my_issues", "post_issue_comment", "update_issue_status"],
+    );
+    assert.equal(names.includes("create_sub_issue"), false);
+  });
+
+  it("an empty allowlist registers no tools", () => {
+    const server = buildServer({
+      client: stubClient(),
+      scopedIssueId: null,
+      allowedTools: [],
+    });
+    const names = Object.keys(
+      (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
+    );
+    assert.deepEqual(names, []);
+  });
+});
+
+describe("parseAllowedToolsEnv", () => {
+  it("returns null for undefined/null (no allowlist, register all)", () => {
+    assert.equal(parseAllowedToolsEnv(undefined), null);
+    assert.equal(parseAllowedToolsEnv(null), null);
+  });
+
+  it("returns [] for empty/whitespace-only (explicit deny-all)", () => {
+    // The env-var round-trip preserves intent: buildMcpServerSpec
+    // emits PAPERCLIP_MCP_TOOLS="" when allowedTools is [], and we
+    // must read that back as deny-all, not "no allowlist".
+    assert.deepEqual(parseAllowedToolsEnv(""), []);
+    assert.deepEqual(parseAllowedToolsEnv("   "), []);
+  });
+
+  it("splits a comma-separated list, trims entries, drops empties", () => {
+    assert.deepEqual(
+      parseAllowedToolsEnv(" list_my_issues , get_issue ,, post_issue_comment "),
+      ["list_my_issues", "get_issue", "post_issue_comment"],
+    );
+  });
+});
+
+describe("resolveToolsToRegister", () => {
+  it("returns all tools when the allowlist is null/undefined", () => {
+    assert.equal(resolveToolsToRegister(null).length, 5);
+    assert.equal(resolveToolsToRegister(undefined).length, 5);
+  });
+
+  it("filters to the allowed names, preserving ALL_TOOLS order", () => {
+    const resolved = resolveToolsToRegister(["get_issue", "list_my_issues"]);
+    const names = resolved.map((t) => t.name);
+    // Order follows ALL_TOOLS definition order, not allowlist order.
+    assert.deepEqual(names, ["list_my_issues", "get_issue"]);
+  });
+
+  it("silently drops unknown names (logs to stderr; doesn't throw)", () => {
+    const resolved = resolveToolsToRegister(["list_my_issues", "nope", "also_nope"]);
+    assert.deepEqual(resolved.map((t) => t.name), ["list_my_issues"]);
   });
 });
 
