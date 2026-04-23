@@ -128,6 +128,63 @@ state.db is a definitive "no" (`source: "no-state-db"`), and only
 probe errors that leave state.db readable-but-inconclusive (corrupt
 bytes, schema drift, permission denied) remain fail-open.
 
+**0.8.7-mil.0 — adapter pre-flight skip for no-work wakes:** first
+half of the fix for the 2026-04-04 autonomous-work-loop incident
+(see the consumer repo's `docs/incidents/2026-04-04-autonomous-work-loop.md`).
+Before invoking Hermes, the adapter now queries
+`GET /companies/:id/issues?assigneeAgentId=:agent` and, if zero
+open issues are assigned, returns early with
+`resultJson.preflight: "skipped"` and a `summary` noting no LLM
+call was made. Explicit task/comment runs bypass the check
+(heartbeat-driven work always proceeds). Any ambiguity — missing
+credentials, network error, HTTP 5xx, malformed response — is
+fail-open: the pre-flight is a cost optimization, never a
+correctness barrier. The root cause it addresses: 15 idling agents
+running periodic wakes were each burning a full LLM call per
+heartbeat just to discover there was nothing to do, driving a
+~$100/day credit burn. Opt-out is `adapterConfig.preflightSkip:
+false` per-agent. Eight new tests in `preflight.test.ts` cover the
+explicit-bypass, fail-open, and skip-on-empty paths.
+
+**0.8.8-mil.0 — per-agent MCP tool allowlist + `create_sub_issue`
+requires `parentIssueId`:** second half of the 2026-04-04 autonomous-
+work-loop fix. 0.8.7 stops the LLM call on no-work wakes; 0.8.8
+stops fabrication of new top-level issues even when an agent
+legitimately runs.
+
+Two structural changes: (1) `create_sub_issue` now rejects missing
+or blank `parentIssueId` with `retryPolicy: fix-args`. Combined
+with the existing `assertWriteScope` (which already required
+parent == current issue when a parent was set), agents can only
+create sub-tasks nested under the issue they're actively working
+on. This was the mechanism behind the CEO agent's 49-issue
+fabrication spree on 2026-04-03: the schema allowed `undefined`,
+the LLM obliged, and the sub-issue became a top-level issue.
+(2) `buildServer({ allowedTools })` now accepts a per-agent list
+of tool names and filters `ALL_TOOLS` to only those — propagated
+to the MCP subprocess via a comma-separated
+`PAPERCLIP_MCP_TOOLS` env var on the per-run `config.yaml`.
+Unknown names log + skip (typo-tolerant). Three env states are
+distinguished: unset → register all (backwards compat), `""`
+(explicit empty) → deny-all, `"a,b,c"` → allowlist. The empty
+string deny-all is important for the round-trip: an operator who
+writes `paperclipMcpTools: []` in the agent config must see an
+MCP server that registers nothing, not one that falls back to
+register-everything.
+
+The consumer-side policy (see `marketintellabs/paperclip/company-template.json`):
+10 delegator agents (CEO, Chief of Staff, 4 Heads, Distribution
+Manager, Managing Editor, News Desk Editor, Trading Analyst) get
+the 4-tool base set plus `create_sub_issue`; 29 worker agents get
+only the base set (`list_my_issues`, `get_issue`,
+`post_issue_comment`, `update_issue_status`). Workers can read
+their queue, read an issue, comment, and close — but the
+`create_sub_issue` tool is not even registered in their MCP
+subprocess, so the LLM cannot attempt the call. Eleven new tests
+in `server.test.ts` + `hermes-home.test.ts` + `tools.test.ts`
+cover allowlist filtering, env round-trip, and the new
+`parentIssueId` required/blank rejection paths.
+
 **0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
 `--resume <id>` names an unknown session it prints
 `"Use a session ID from a previous CLI run"`. The legacy non-quiet

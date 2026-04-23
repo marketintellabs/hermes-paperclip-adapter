@@ -6,6 +6,16 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.8-mil.1] — 2026-04-23
+
+### Fixed
+- **README release notes for 0.8.7 and 0.8.8 were missing**, which is what npmjs.com's Versions tab reads from (npm renders the package README on both the main tab and the versions tab; it does NOT pull from git tags or GitHub Releases). Added the "Currently in flight (0.8.x)" entries for `0.8.7-mil.0` (pre-flight skip) and `0.8.8-mil.0` (per-agent tool allowlist + required `parentIssueId`) so they show up alongside `0.8.4`/`0.8.5`/`0.8.6` on npmjs.com.
+
+### Notes
+- Docs-only release. No code changes from `0.8.8-mil.0`; adapter behaviour, MCP tool surface, and pre-flight semantics are identical. Existing deployments do not need to redeploy unless you specifically want the updated README shipped inside the published tarball.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.8-mil.1)
+
 ## [0.8.8-mil.0] — 2026-04-22
 
 ### Added
