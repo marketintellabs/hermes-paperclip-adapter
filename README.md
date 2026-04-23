@@ -61,12 +61,26 @@ small allowlist (`PATH`, `HOME`, `USER`, `LANG`, `LC_ALL`, `TERM`,
 The write is a no-op; 0.8.3 removes it and leans solely on the
 config.yaml path (which `hermes-home.ts` has always populated).
 
+**0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
+`--resume <id>` names an unknown session it prints
+`"Use a session ID from a previous CLI run"`. The legacy non-quiet
+session-id regex matched the phrase `"session ID from"` and captured
+the literal word `"from"` as a session id; Paperclip persisted it as
+`session_id_after` and the next heartbeat re-ran `--resume from`,
+crashing in exactly the same way. Fix is three layers of defense:
+anchor the legacy regex to `session_id:` / `session saved:` with a
+mandatory colon, reject captured tokens that don't look like real
+session ids (`isPlausibleSessionId` — min length, must contain a
+digit/hyphen/underscore), and skip session-id extraction entirely when
+`"Session not found"` appears in the output. Regression pinned by nine
+new tests in `parse-hermes-output.test.ts`.
+
 **0.8.3-mil.0 — resume guard + config diagnostic:** two small defenses
 on top of 0.8.2. (1) Before passing `--resume <id>` to `hermes chat`
 we now re-run `isPlausibleSessionId` on the stored `sessionParams.sessionId`
 via a new `resolveResumeSessionId` helper. If some other store (a
-Hermes SQLite state file, a paperclip cache we missed during the
-MAR-30 cleanup) still holds a poisoned value, we log the rejection and
+Hermes SQLite state file, a paperclip cache missed during cleanup)
+still holds a poisoned value, we log the rejection and
 let the run create a fresh session instead of inheriting a crash loop.
 (2) After writing the per-run `config.yaml`, the adapter reads it
 back and logs `audit=<bool> liveness=<bool>` so a single line of
@@ -129,9 +143,10 @@ probe errors that leave state.db readable-but-inconclusive (corrupt
 bytes, schema drift, permission denied) remain fail-open.
 
 **0.8.7-mil.0 — adapter pre-flight skip for no-work wakes:** first
-half of the fix for the 2026-04-04 autonomous-work-loop incident
-(see the consumer repo's `docs/incidents/2026-04-04-autonomous-work-loop.md`).
-Before invoking Hermes, the adapter now queries
+half of a two-part fix for an autonomous-work-loop failure mode
+where idle agents on heartbeat schedules kept driving LLM calls
+with no assigned work. Before invoking Hermes, the adapter now
+queries
 `GET /companies/:id/issues?assigneeAgentId=:agent` and, if zero
 open issues are assigned, returns early with
 `resultJson.preflight: "skipped"` and a `summary` noting no LLM
@@ -139,30 +154,30 @@ call was made. Explicit task/comment runs bypass the check
 (heartbeat-driven work always proceeds). Any ambiguity — missing
 credentials, network error, HTTP 5xx, malformed response — is
 fail-open: the pre-flight is a cost optimization, never a
-correctness barrier. The root cause it addresses: 15 idling agents
-running periodic wakes were each burning a full LLM call per
-heartbeat just to discover there was nothing to do, driving a
-~$100/day credit burn. Opt-out is `adapterConfig.preflightSkip:
-false` per-agent. Eight new tests in `preflight.test.ts` cover the
+correctness barrier. The root cause it addresses: idle agents on
+periodic heartbeat schedules were each burning a full LLM call per
+wake just to discover there was nothing to do, multiplied across
+the agent roster. Opt-out is `adapterConfig.preflightSkip: false`
+per-agent. Eight new tests in `preflight.test.ts` cover the
 explicit-bypass, fail-open, and skip-on-empty paths.
 
 **0.8.8-mil.0 — per-agent MCP tool allowlist + `create_sub_issue`
-requires `parentIssueId`:** second half of the 2026-04-04 autonomous-
-work-loop fix. 0.8.7 stops the LLM call on no-work wakes; 0.8.8
-stops fabrication of new top-level issues even when an agent
-legitimately runs.
+requires `parentIssueId`:** companion to 0.8.7. 0.8.7 stops the LLM
+call on no-work wakes; 0.8.8 stops fabrication of new top-level
+issues even when an agent legitimately runs.
 
 Two structural changes: (1) `create_sub_issue` now rejects missing
 or blank `parentIssueId` with `retryPolicy: fix-args`. Combined
 with the existing `assertWriteScope` (which already required
 parent == current issue when a parent was set), agents can only
 create sub-tasks nested under the issue they're actively working
-on. This was the mechanism behind the CEO agent's 49-issue
-fabrication spree on 2026-04-03: the schema allowed `undefined`,
-the LLM obliged, and the sub-issue became a top-level issue.
-(2) `buildServer({ allowedTools })` now accepts a per-agent list
-of tool names and filters `ALL_TOOLS` to only those — propagated
-to the MCP subprocess via a comma-separated
+on. Previously the schema allowed `parentIssueId: undefined`, the
+LLM obliged when told to "break work down into sub-issues", and the
+resulting sub-issue became a top-level issue with no parent — the
+mechanism behind top-level-issue fabrication bursts seen in the
+wild. (2) `buildServer({ allowedTools })` now accepts a per-agent
+list of tool names and filters `ALL_TOOLS` to only those —
+propagated to the MCP subprocess via a comma-separated
 `PAPERCLIP_MCP_TOOLS` env var on the per-run `config.yaml`.
 Unknown names log + skip (typo-tolerant). Three env states are
 distinguished: unset → register all (backwards compat), `""`
@@ -172,33 +187,16 @@ writes `paperclipMcpTools: []` in the agent config must see an
 MCP server that registers nothing, not one that falls back to
 register-everything.
 
-The consumer-side policy (see `marketintellabs/paperclip/company-template.json`):
-10 delegator agents (CEO, Chief of Staff, 4 Heads, Distribution
-Manager, Managing Editor, News Desk Editor, Trading Analyst) get
-the 4-tool base set plus `create_sub_issue`; 29 worker agents get
-only the base set (`list_my_issues`, `get_issue`,
-`post_issue_comment`, `update_issue_status`). Workers can read
-their queue, read an issue, comment, and close — but the
-`create_sub_issue` tool is not even registered in their MCP
-subprocess, so the LLM cannot attempt the call. Eleven new tests
-in `server.test.ts` + `hermes-home.test.ts` + `tools.test.ts`
-cover allowlist filtering, env round-trip, and the new
-`parentIssueId` required/blank rejection paths.
-
-**0.8.2-mil.0 — session-id poisoning fix:** when Hermes crashes because
-`--resume <id>` names an unknown session it prints
-`"Use a session ID from a previous CLI run"`. The legacy non-quiet
-session-id regex matched the phrase `"session ID from"` and captured
-the literal word `"from"` as a session id; Paperclip persisted it as
-`session_id_after` and the next heartbeat re-ran `--resume from`,
-crashing in exactly the same way. Fix is three layers of defense:
-anchor the legacy regex to `session_id:` / `session saved:` with a
-mandatory colon, reject captured tokens that don't look like real
-session ids (`isPlausibleSessionId` — min length, must contain a
-digit/hyphen/underscore), and skip session-id extraction entirely when
-`"Session not found"` appears in the output. Regression pinned by nine
-new tests in `parse-hermes-output.test.ts` (driven by the MAR-30
-heartbeat crash loop on 2026-04-19).
+Recommended consumer-side policy: delegator agents (those that are
+expected to break work down) get the 4-tool base set
+(`list_my_issues`, `get_issue`, `post_issue_comment`,
+`update_issue_status`) plus `create_sub_issue`; worker agents get
+only the base set. Workers can read their queue, read an issue,
+comment, and close — but the `create_sub_issue` tool is not even
+registered in their MCP subprocess, so the LLM cannot attempt the
+call. Eleven new tests in `server.test.ts` + `hermes-home.test.ts`
++ `tools.test.ts` cover allowlist filtering, env round-trip, and
+the new `parentIssueId` required/blank rejection paths.
 
 Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
@@ -232,7 +230,7 @@ Features you get in this fork that upstream doesn't ship:
   fallback.
 - **Session-id poisoning guard** (0.8.2+) — the legacy session-id
   regex is anchored and validated so Hermes' own error prose can't be
-  mis-captured as a session id (MAR-30 heartbeat crash-loop regression).
+  mis-captured as a session id.
 - **OpenRouter model-prefix hints** — `anthropic/`, `openai/`, `x-ai/`,
   `zai-org/` model IDs route to `provider: openrouter` automatically.
 - **Two MIL heartbeat prompt templates** shipped in the package

@@ -6,6 +6,16 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.8-mil.2] — 2026-04-04
+
+### Changed
+- **README scrubbed of consumer-specific operational details.** The `0.8.8-mil.0` release notes previously named specific agent roles (CEO, Chief of Staff, Heads, Managing Editor, etc.) and referenced an internal incident (the "49-issue fabrication spree"). Rewrote those passages to describe the mechanism and recommended policy generically, so the public npmjs.com package page doesn't leak consumer org structure. Also reordered the "Currently in flight (0.8.x)" section so versions appear in chronological order (0.8.0 → 0.8.8) instead of having 0.8.2 appended at the bottom out of sequence.
+
+### Notes
+- Docs-only release. No code changes from `0.8.8-mil.1`. Existing deployments do not need to redeploy.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.8-mil.2)
+
 ## [0.8.8-mil.1] — 2026-04-23
 
 ### Fixed
@@ -27,7 +37,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - **`create_sub_issue` now REQUIRES `parentIssueId`.** Previously optional; empty/blank now returns `retryPolicy=fix-args` with `MISSING_PARENT` audit log. Combined with the existing `assertWriteScope`, agents can only create sub-tasks of the issue they're actively working on — top-level issues come only from humans or Paperclip Routines.
 
 ### Why
-Second half of the [2026-04-04 autonomous-work-loop fix](https://github.com/marketintellabs/marketintellabs/blob/main/docs/incidents/2026-04-04-autonomous-work-loop.md). Closes the structural path that let the CEO agent fabricate 49 top-level issues in one day.
+Companion to `0.8.7-mil.0`. 0.8.7 stops the LLM call on no-work heartbeat wakes; 0.8.8 closes the structural path that let agents fabricate unparented top-level issues when they did run. Together they address the two failure modes behind the autonomous-work-loop class of cost incident.
 
 [Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.8-mil.0)
 
@@ -39,7 +49,7 @@ Second half of the [2026-04-04 autonomous-work-loop fix](https://github.com/mark
 - 8 new tests covering explicit-task bypass, fail-open paths, and skip decisions.
 
 ### Why
-First half of the 2026-04-04 autonomous-work-loop fix. Stops the "wake → zero-work LLM call → \$0.05–\$0.50 burned" pattern that was the primary driver of a \$100/day credit burn when multiplied across 15 idling agents.
+First half of a two-part autonomous-work-loop fix (paired with `0.8.8-mil.0`). Stops the "wake → zero-work LLM call → credits burned" pattern where idle agents on periodic heartbeat schedules each spent a full LLM call per wake just to discover there was nothing to do.
 
 [Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.7-mil.0)
 
