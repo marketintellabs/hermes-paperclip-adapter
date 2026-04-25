@@ -6,6 +6,21 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.13-mil.0] — 2026-04-25
+
+### Fixed
+- **`create_sub_issue` no longer creates orphaned children.** The adapter sent `parentIssueId` in the POST body; Paperclip's `POST /companies/:id/issues` schema uses the column-aligned name `parentId` and silently drops unknown fields, so every sub-issue landed with `parent_id = NULL`. The parent never saw its children, status reconciliation didn't propagate, and the test-mode-inheritance fix from 0.8.11-mil.0 (which prepends `<!-- mode: test -->` to the child body) couldn't help because the child was never linked to the parent in the first place. Now the payload uses `parentId`, and a regression test asserts the wire shape so the field name can't drift again.
+- **Delegated sub-issues now wake the assignee immediately.** The same `POST` was missing a `status` field, so Paperclip defaulted it to `backlog`. `backlog` does not fire the assignee's `on_assign` heartbeat, so the delegated agent never woke up — the work just sat there. The adapter now explicitly sends `status: "todo"`. Combined with the `parentId` fix, delegation actually delegates: the parent calls `create_sub_issue`, Paperclip writes a `todo` issue with the right `parent_id`, the assignee wakes within seconds, and the parent's status reconciliation closes the loop on completion.
+
+### Added
+- One regression test (`payload contract: parentId + status=todo even when test mode + priority unset`) and four new assertions on the existing happy-path test, all locking the wire-level field names that Paperclip actually accepts. The previous happy-path test was the reason this regression shipped — it asserted `body.parentIssueId === ...`, which was the field the adapter *sent* but not the field Paperclip *read*. Now the test fixtures the actual API contract: `body.parentId` is set, `body.parentIssueId` is `undefined`, `body.status === "todo"`.
+
+### Notes
+- **Postmortem:** see Stage 3 entry in `marketintellabs/docs/ADAPTER_LIFECYCLE.md` (2026-04-25). Surfaced during paid-model retest after Stage 2 validated test-mode activation. Ironically caught by switching to a paid model — the free model's tool-call failures were masking this bug because no `create_sub_issue` call ever succeeded in the free-model runs.
+- **No prompt-template change.** This is a wire-format fix in the MCP tool layer; the LLM-facing tool input schema still uses `parentIssueId` (descriptive — pairs with `assigneeAgentId`, `companyId`).
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.13-mil.0)
+
 ## [0.8.12-mil.1] — 2026-04-25
 
 ### Changed
