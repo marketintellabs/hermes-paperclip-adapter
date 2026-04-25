@@ -6,6 +6,21 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.12-mil.0] — 2026-04-25
+
+### Fixed
+- **Per-issue test mode now actually fires.** The 0.8.11-mil.0 feature was silently broken in production: Paperclip's heartbeat wake snapshot puts the issue title at `ctx.context.paperclipWake.issue.title` (not on `ctx.context.taskTitle`) and **omits the issue body entirely**, so the adapter's `resolveTestMode` always saw `body=""` and never matched the `<!-- mode: test -->` marker. Every per-issue smoketest silently downgraded to the production paid model. Now `execute()` runs `enrichRunContext()` before resolving test mode: it reads the title from the wake snapshot if missing, and if the body is still empty it issues `GET /api/issues/<taskId>` to Paperclip (using the per-run JWT already on `ctx.authToken`) to fetch the description. Bounded 3-second timeout, non-fatal on failure — the run continues exactly as it would have on 0.8.11 if the API call fails. Diagnostic line `[hermes] enriched run context: taskTitle=wake-snapshot,taskBody=api (api=18ms)` lands in stdout on every successful enrichment.
+- **`taskTitle=missing` log noise.** Same root cause: the canonical resolver was looking at the wrong place. Title now resolves from the wake snapshot synchronously (no I/O) so `[hermes] run context provenance: ...` no longer reports `taskTitle=missing` for normal Paperclip wakes.
+
+### Added
+- 12 new tests in `run-context.test.ts` covering wake-snapshot title extraction, API-sourced body enrichment, marker-detection-via-API end-to-end, idempotence (no fetch when body already populated), `no_auth_token` / `http_404` / `timeout` failure modes, and trailing-slash / missing-`/api` URL normalization.
+
+### Notes
+- **No prompt-template change.** `mil-heartbeat-v3` already rendered `{{taskBody}}`; before this fix the variable was always empty. With enrichment it now expands to the actual issue body, which means agents have the body in their first prompt instead of having to call `mcp_paperclip_get_issue` to fetch it. One fewer round-trip per wake; net token cost is roughly neutral (issue body was going into context either way).
+- **Postmortem:** see the 2026-04-25 Stage 2 entry in `marketintellabs/docs/ADAPTER_LIFECYCLE.md` for the full investigation.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.12-mil.0)
+
 ## [0.8.11-mil.1] — 2026-04-25
 
 ### Changed
