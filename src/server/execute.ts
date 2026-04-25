@@ -145,7 +145,7 @@ function cfgAuxiliaryModels(
 // it. The returned provenance lets us log exactly where each field came
 // from so future misconfigurations self-diagnose on the next smoke test
 // instead of leaking into a DB dig.
-type FieldProvenance = "context" | "config" | "missing";
+type FieldProvenance = "context" | "config" | "wake-snapshot" | "api" | "missing";
 
 export interface ResolvedField {
   value: string;
@@ -161,6 +161,25 @@ export function resolveRunContextField(
   const fromConfig = cfgString((ctx.config as Record<string, unknown> | undefined)?.[key]);
   if (fromConfig) return { value: fromConfig, source: "config" };
   return { value: "", source: "missing" };
+}
+
+/**
+ * Pull `taskTitle` from the wake snapshot when the canonical resolver came
+ * up empty. Paperclip's heartbeat harness puts the issue summary at
+ * `ctx.context.paperclipWake.issue.title` (it does NOT mirror it onto a
+ * top-level `taskTitle` field), so without this fallback every run logs
+ * `taskTitle=missing` even when the title is right there in the snapshot.
+ *
+ * Pure: no I/O, no env. Returns the wake-snapshot title or `""`.
+ */
+export function readWakeSnapshotTitle(
+  ctx: Pick<AdapterExecutionContext, "context">,
+): string {
+  const wake = (ctx.context as Record<string, unknown> | undefined)?.paperclipWake;
+  if (!wake || typeof wake !== "object") return "";
+  const issue = (wake as Record<string, unknown>).issue;
+  if (!issue || typeof issue !== "object") return "";
+  return cfgString((issue as Record<string, unknown>).title) ?? "";
 }
 
 /**
@@ -203,6 +222,164 @@ export function buildRunContext(ctx: AdapterExecutionContext): RunContext {
     out.provenance![f] = r.source;
   }
   return out as RunContext;
+}
+
+/**
+ * Result of {@link enrichRunContext}. Reports which fields were filled in,
+ * how (wake-snapshot vs API), and whether anything went wrong. Pure data —
+ * the function mutates the {@link RunContext} in place; this object is
+ * just for diagnostic logging.
+ */
+export interface EnrichmentResult {
+  enrichedFields: Array<"taskTitle" | "taskBody">;
+  apiCallMs: number | null;
+  apiStatus: number | null;
+  error: string | null;
+}
+
+/**
+ * Resolve the Paperclip API base URL the same way `buildPrompt` does so
+ * the adapter and the rendered curl examples agree on which Paperclip
+ * instance they're talking to.
+ */
+function resolvePaperclipApiBase(
+  ctx: Pick<AdapterExecutionContext, "config" | "context">,
+): string {
+  const config = (ctx.config as Record<string, unknown> | undefined) ?? {};
+  const context = (ctx.context as Record<string, unknown> | undefined) ?? {};
+  let base =
+    cfgString(config.paperclipApiUrl) ||
+    cfgString(context.paperclipApiUrl) ||
+    process.env.PAPERCLIP_API_URL ||
+    "";
+  if (!base) return "";
+  base = base.replace(/\/+$/, "");
+  if (!base.endsWith("/api")) base += "/api";
+  return base;
+}
+
+/**
+ * Fill the missing pieces of a {@link RunContext} from the wake snapshot
+ * (cheap, in-memory) and, if still incomplete, from the Paperclip REST API
+ * (`GET /api/issues/<taskId>`).
+ *
+ * **Why this exists.** Paperclip's heartbeat harness emits a wake snapshot
+ * containing `taskId`, `paperclipWake.issue.{id,title,status,priority,
+ * identifier}`, and a few workspace markers — but NOT the issue body. The
+ * adapter needs the body before it can run {@link resolveTestMode} (the
+ * `<!-- mode: test -->` marker check); without it, every per-issue test-
+ * mode activation is silently lost. Pre-0.8.12 the adapter just shrugged
+ * and ran on the production model. This function closes that hole.
+ *
+ * **Failure mode.** If the API call fails (network, auth, 404, timeout)
+ * we leave {@link RunContext.taskBody} as `""` and the run continues
+ * exactly as it would have before this function existed. The error is
+ * captured in the return value so the caller can log it once at the
+ * top of the run for diagnostics.
+ *
+ * @param run    Mutable run context. Updated in place.
+ * @param ctx    The adapter execution context.
+ * @param fetchImpl Test seam — defaults to global `fetch`.
+ * @param timeoutMs Hard ceiling on the API call. Default 3000 ms.
+ *                  The Paperclip API is on the same private subnet so
+ *                  P99 is well under 200ms; the timeout is for the
+ *                  pathological case where Paperclip is wedged.
+ */
+export async function enrichRunContext(
+  run: RunContext,
+  ctx: AdapterExecutionContext,
+  opts: {
+    fetchImpl?: typeof fetch;
+    timeoutMs?: number;
+  } = {},
+): Promise<EnrichmentResult> {
+  const result: EnrichmentResult = {
+    enrichedFields: [],
+    apiCallMs: null,
+    apiStatus: null,
+    error: null,
+  };
+
+  if (!run.taskTitle) {
+    const wakeTitle = readWakeSnapshotTitle(ctx);
+    if (wakeTitle) {
+      run.taskTitle = wakeTitle;
+      run.provenance.taskTitle = "wake-snapshot";
+      result.enrichedFields.push("taskTitle");
+    }
+  }
+
+  if (run.taskBody) return result;
+  const taskId = run.taskId;
+  if (!taskId) return result;
+
+  const authToken =
+    cfgString((ctx as { authToken?: unknown }).authToken) ||
+    process.env.PAPERCLIP_API_KEY ||
+    "";
+  if (!authToken) {
+    result.error = "no_auth_token";
+    return result;
+  }
+
+  const apiBase = resolvePaperclipApiBase(ctx);
+  if (!apiBase) {
+    result.error = "no_api_base";
+    return result;
+  }
+
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const timeoutMs = opts.timeoutMs ?? 3000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
+  try {
+    const url = `${apiBase}/issues/${encodeURIComponent(taskId)}`;
+    const resp = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${authToken}`,
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    result.apiCallMs = Date.now() - t0;
+    result.apiStatus = resp.status;
+    if (!resp.ok) {
+      result.error = `http_${resp.status}`;
+      return result;
+    }
+    const body = (await resp.json()) as {
+      title?: unknown;
+      description?: unknown;
+    };
+    if (!run.taskTitle) {
+      const apiTitle = cfgString(body.title);
+      if (apiTitle) {
+        run.taskTitle = apiTitle;
+        run.provenance.taskTitle = "api";
+        result.enrichedFields.push("taskTitle");
+      }
+    }
+    if (!run.taskBody) {
+      const apiBody = cfgString(body.description);
+      if (apiBody) {
+        run.taskBody = apiBody;
+        run.provenance.taskBody = "api";
+        result.enrichedFields.push("taskBody");
+      }
+    }
+  } catch (err) {
+    result.apiCallMs = Date.now() - t0;
+    if (err instanceof Error) {
+      result.error = err.name === "AbortError" ? "timeout" : err.message;
+    } else {
+      result.error = String(err);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1045,6 +1222,36 @@ export async function execute(
   // reconcileOutcome so no downstream reader silently re-reads the wrong
   // bag.
   const run = buildRunContext(ctx);
+
+  // ── Enrich the run context from sources Paperclip doesn't put on the
+  // canonical `ctx.context` shape. Two layers:
+  //
+  //   1. Wake-snapshot fallback for `taskTitle` — Paperclip puts the title
+  //      at `ctx.context.paperclipWake.issue.title`, not at top level.
+  //   2. Paperclip REST API for `taskBody` — the wake snapshot omits the
+  //      issue description entirely. Without this, the per-issue test-mode
+  //      marker (`<!-- mode: test -->`) is silently invisible to
+  //      `resolveTestMode` and every smoketest-as-issue runs on the paid
+  //      production model. (See 2026-04-25 Stage 2 incident postmortem in
+  //      docs/ADAPTER_LIFECYCLE.md.)
+  //
+  // Failures here are non-fatal — we just continue with whatever fields
+  // resolve, exactly as the pre-0.8.12 adapter did.
+  const enrichment = await enrichRunContext(run, ctx);
+  if (enrichment.enrichedFields.length > 0) {
+    const apiPart =
+      enrichment.apiCallMs != null ? ` api=${enrichment.apiCallMs}ms` : "";
+    await ctx.onLog(
+      "stdout",
+      `[hermes] enriched run context: ${enrichment.enrichedFields.join(",")} (sources: ${enrichment.enrichedFields.map((f) => `${f}=${run.provenance[f]}`).join(",")}${apiPart})`,
+    );
+  }
+  if (enrichment.error) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] context enrichment error: ${enrichment.error}${enrichment.apiStatus ? ` (status=${enrichment.apiStatus})` : ""} — continuing without API-sourced fields`,
+    );
+  }
 
   // ── Test-mode override (env-var OR per-issue) ──────────────────────────
   // Two activation paths, evaluated in priority order (env wins):
