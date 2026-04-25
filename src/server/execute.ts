@@ -86,6 +86,30 @@ function cfgStringArray(v: unknown): string[] | undefined {
     ? (v as string[])
     : undefined;
 }
+/**
+ * Validate `adapterConfig.auxiliaryModels`. Accepts a plain object
+ * whose values are themselves plain objects (the slot configs).
+ * Anything else (string, array, primitive) returns `undefined` so a
+ * misshapen value silently no-ops rather than corrupting config.yaml.
+ *
+ * The slot-config inner shape is intentionally NOT validated here —
+ * different Hermes versions accept different keys (model, provider,
+ * temperature, max_tokens, …). We pass the operator's object through
+ * to YAML verbatim; misconfiguration shows up as a Hermes-side error
+ * rather than a silent adapter rewrite.
+ */
+function cfgAuxiliaryModels(
+  v: unknown,
+): Record<string, Record<string, unknown>> | undefined {
+  if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [slot, value] of Object.entries(v as Record<string, unknown>)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      out[slot] = value as Record<string, unknown>;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Run-context field resolution (taskId / taskTitle / wakeReason / …)
@@ -1312,6 +1336,15 @@ export async function execute(
     // per-agent lists.
     const paperclipMcpTools = cfgStringArray(config.paperclipMcpTools);
 
+    // Per-agent auxiliary-models override from adapterConfig (0.8.9+).
+    // No-op against Hermes < v2026.4.23 (the `auxiliary:` block didn't
+    // exist there), but lets operators preempt the v0.11.0+ default
+    // of "main model for every auxiliary task" — which would silently
+    // route compression / session_search / title_generation through
+    // an expensive aggregator model. See `auxiliaryModels` field in
+    // src/server/hermes-home.ts for the cost rationale.
+    const auxiliaryModels = cfgAuxiliaryModels(config.auxiliaryModels);
+
     perRunHome = await buildPerRunHermesHome(ctx.runId || "no-run-id", {
       apiUrl: paperclipClient.base,
       apiKey: paperclipClient.apiKey,
@@ -1320,6 +1353,7 @@ export async function execute(
       issueId: taskId ?? null,
       runId: ctx.runId ?? null,
       allowedTools: paperclipMcpTools ?? null,
+      auxiliaryModels: auxiliaryModels ?? null,
     });
     env.HERMES_HOME = perRunHome.path;
     // Note: setting telemetry vars on the adapter's own env does NOT help —
@@ -1348,10 +1382,13 @@ export async function execute(
       const paperclipBlock = perRunYaml.match(/\n\s{2}paperclip:\n[\s\S]*?(?=\n\S|$)/);
       const hasAudit = /PAPERCLIP_MCP_AUDIT_LOG:\s*\S/.test(paperclipBlock?.[0] ?? "");
       const hasLiveness = /PAPERCLIP_MCP_LIVENESS_FILE:\s*\S/.test(paperclipBlock?.[0] ?? "");
+      // Surface auxiliary-models presence so a missed override is
+      // visible in a single log line instead of buried in cost reports.
+      const hasAuxiliary = /^auxiliary:/m.test(perRunYaml);
       await ctx.onLog(
         "stdout",
         `[hermes] per-run config.yaml env: audit=${hasAudit} liveness=${hasLiveness} ` +
-          `(bytes=${perRunYaml.length})\n`,
+          `auxiliary=${hasAuxiliary} (bytes=${perRunYaml.length})\n`,
       );
     } catch (err) {
       await ctx.onLog(

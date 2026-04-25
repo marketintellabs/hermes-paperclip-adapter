@@ -6,6 +6,21 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.9-mil.0] — 2026-04-25
+
+### Added
+- **Per-agent auxiliary-models override** (`adapterConfig.auxiliaryModels`). Each top-level key is a Hermes auxiliary slot name (`compression`, `vision`, `session_search`, `title_generation`, …) and the value is an arbitrary YAML object passed through verbatim to the per-run `config.yaml` `auxiliary:` block. Lets operators preempt the cost regression introduced by Hermes >= v2026.4.23 (v0.11.0), which changed the default for auxiliary tasks from "use a cheap aggregator-side model" to "use the main model" — silently expensive for OpenRouter / Nous Portal users running an expensive main model like Claude Opus or grok-4.
+- New diagnostic in the `[hermes] per-run config.yaml env: …` log line: `auxiliary=<bool>` so a missed override is visible in a single line of `stdout_excerpt` rather than buried in cost reports.
+- Slot-level merge with `~/.hermes/config.yaml`: per-agent override wins on slot collisions; operator-global slots not named in adapterConfig survive untouched. So an operator can set `auxiliary.vision` globally while the adapter sets `auxiliary.compression` per-agent, and both end up in the per-run config.
+- 9 new tests in `hermes-home.test.ts` covering the no-override / override / slot-collision / partial-merge / defensive-shape paths.
+
+### Notes
+- **No-op against the currently-pinned Hermes** (`v2026.4.13` / v0.9.0) — the `auxiliary:` block didn't exist there, Hermes ignores it. Safe to roll out per-agent before bumping `HERMES_VERSION` in the consumer's Dockerfiles.
+- Backwards compatible: when `adapterConfig.auxiliaryModels` is absent / null / `{}`, the adapter writes no `auxiliary:` key at all (preserves the pre-0.8.9 behaviour exactly).
+- See the README "MIL-specific features" entry for the recommended OpenRouter cheap-default config snippet.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.9-mil.0)
+
 ## [0.8.8-mil.2] — 2026-04-04
 
 ### Changed

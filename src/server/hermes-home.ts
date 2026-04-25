@@ -40,6 +40,49 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 
 /**
+ * Per-agent override for Hermes' auxiliary-task models.
+ *
+ * Hermes makes background LLM calls outside the main agent loop for
+ * `compression` (context summarisation), `vision` (image parsing),
+ * `session_search` (hindsight retrieval), and `title_generation`
+ * (auto-naming new sessions). Hermes >= v2026.4.23 ("v0.11.0") changed
+ * the default from "use a cheap aggregator-side model" to "use the
+ * main model" — which silently regresses cost for OpenRouter / Nous
+ * Portal users when the main model is something expensive like
+ * Claude Opus or grok-4.
+ *
+ * This field is the per-agent escape hatch. Each top-level key is a
+ * Hermes auxiliary slot name; the value is an arbitrary YAML object
+ * passed through verbatim to the per-run `config.yaml` `auxiliary:`
+ * block. Most callers will use `{ provider, model }` per slot, but
+ * the shape is intentionally open so a future Hermes that adds
+ * `temperature`, `max_tokens`, or a new auxiliary slot doesn't
+ * require an adapter change.
+ *
+ * Effect is a no-op against Hermes < v2026.4.23 (those versions
+ * ignore the `auxiliary:` block entirely). Setting this on
+ * `adapterConfig` is therefore safe to roll out before the Hermes
+ * upgrade — the override kicks in automatically once Hermes is
+ * bumped.
+ *
+ * Example:
+ *
+ *     auxiliaryModels:
+ *       compression:
+ *         provider: openrouter
+ *         model: meta-llama/llama-3.1-8b-instruct
+ *       title_generation:
+ *         provider: openrouter
+ *         model: meta-llama/llama-3.1-8b-instruct
+ *
+ * Slots NOT named in this map fall back to whatever the operator
+ * has in `~/.hermes/config.yaml` (or, absent that, Hermes' built-in
+ * default). Slot-level merge — setting `compression` here does not
+ * stomp the operator's `vision` setting.
+ */
+export type AuxiliaryModelsConfig = Record<string, Record<string, unknown>>;
+
+/**
  * Per-run Paperclip MCP scope. All fields except `apiUrl` + `apiKey`
  * are optional — missing ones just won't appear in the env block.
  * The MCP server handles absence gracefully (reads fail with a clear
@@ -65,6 +108,15 @@ export interface PaperclipMcpScope {
    * pointless; ops use case is "read-only audit agent").
    */
   allowedTools?: readonly string[] | null;
+  /**
+   * Per-agent override for Hermes' auxiliary-task models. See
+   * {@link AuxiliaryModelsConfig} for the rationale and shape.
+   * Absent / null / `{}` = adapter writes no `auxiliary:` block,
+   * Hermes' default behaviour applies (which on >= v2026.4.23 means
+   * "use the main model for every auxiliary task" — potentially
+   * expensive).
+   */
+  auxiliaryModels?: AuxiliaryModelsConfig | null;
 }
 
 export interface PerRunHermesHome {
@@ -154,9 +206,52 @@ export function buildMcpServerSpec(
 }
 
 /**
+ * Slot-level merge of an auxiliary-models override into the existing
+ * `auxiliary:` block from a parsed base config. Per-agent overrides
+ * win at the slot level — so an adapterConfig that sets only
+ * `compression` does not stomp the operator's `vision` setting from
+ * `~/.hermes/config.yaml`.
+ *
+ * Returns the merged auxiliary block, or `undefined` if neither side
+ * had anything to contribute (caller should NOT add an empty
+ * `auxiliary:` key in that case — Hermes treats present-but-empty as
+ * "deny all auxiliary calls" on some versions).
+ *
+ * Exported for unit testing.
+ */
+export function mergeAuxiliaryConfig(
+  base: Record<string, unknown> | undefined,
+  override: AuxiliaryModelsConfig | null | undefined,
+): Record<string, Record<string, unknown>> | undefined {
+  const out: Record<string, Record<string, unknown>> = {};
+  if (base && typeof base === "object") {
+    for (const [slot, value] of Object.entries(base)) {
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        out[slot] = { ...(value as Record<string, unknown>) };
+      }
+    }
+  }
+  if (override && typeof override === "object") {
+    for (const [slot, value] of Object.entries(override)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      // Per-agent override wins at the slot level; non-object values
+      // are silently skipped (defensive — adapterConfig comes from
+      // operator-edited JSON).
+      out[slot] = { ...(value as Record<string, unknown>) };
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * Merge a Paperclip MCP scope into a base Hermes config YAML string.
  * Preserves any other `mcp_servers.<name>` entries the operator has
  * added (gmail, github, etc.) and overwrites only the `paperclip` entry.
+ *
+ * Also merges an `auxiliary:` block from `scope.auxiliaryModels`
+ * (per-agent override) into whatever was already in the base
+ * config.yaml's `auxiliary:` block (operator-global override). Slot-
+ * level merge — see {@link mergeAuxiliaryConfig}.
  *
  * Exported for unit testing — production callers use
  * {@link buildPerRunHermesHome} which reads/writes the file.
@@ -177,6 +272,17 @@ export function mergeMcpServerIntoConfig(
     ...existing,
     paperclip: buildMcpServerSpec(scope, mcpCliPath, telemetry),
   };
+
+  const mergedAuxiliary = mergeAuxiliaryConfig(
+    base.auxiliary as Record<string, unknown> | undefined,
+    scope.auxiliaryModels ?? null,
+  );
+  if (mergedAuxiliary) {
+    base.auxiliary = mergedAuxiliary;
+  }
+  // If both base and override were absent, leave `auxiliary` untouched
+  // (could be `undefined` already, or could be set in the base YAML to
+  // some non-object the operator wants preserved as-is).
 
   return stringifyYaml(base, { lineWidth: 0 });
 }

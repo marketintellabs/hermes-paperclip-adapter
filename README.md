@@ -198,6 +198,49 @@ call. Eleven new tests in `server.test.ts` + `hermes-home.test.ts`
 + `tools.test.ts` cover allowlist filtering, env round-trip, and
 the new `parentIssueId` required/blank rejection paths.
 
+**0.8.9-mil.0 — per-agent auxiliary-models override:** ready-but-
+inert escape hatch for the cost regression in Hermes >= v2026.4.23
+("v0.11.0"). Hermes makes background LLM calls outside the main
+agent loop for `compression` (context summarisation), `vision`
+(image parsing), `session_search` (hindsight retrieval), and
+`title_generation` (auto-naming new sessions). v0.11.0 changed the
+default for those calls from "use a cheap aggregator-side model"
+to "use the main model" — which silently routes compression /
+session_search / title_generation through whatever main model the
+agent runs (Claude Opus, grok-4, etc.) when the consumer is an
+OpenRouter or Nous Portal user. For an agent on Claude Opus 4.7,
+that's roughly a 300x cost increase per auxiliary call.
+
+The new `adapterConfig.auxiliaryModels` field accepts an arbitrary
+map of slot name → slot config object, passed through verbatim to
+the per-run `config.yaml` `auxiliary:` block. Slot-level merge
+against the operator's `~/.hermes/config.yaml` — per-agent override
+wins on collisions, operator-global slots not named in adapterConfig
+survive untouched. The adapter emits no `auxiliary:` key when the
+field is absent / null / `{}`, so the change is a no-op for anyone
+not opting in (and a no-op against the currently-pinned Hermes
+v2026.4.13, which ignores the block entirely). Recommended
+OpenRouter-side defaults:
+
+```yaml
+auxiliaryModels:
+  compression:
+    provider: openrouter
+    model: meta-llama/llama-3.1-8b-instruct
+  session_search:
+    provider: openrouter
+    model: meta-llama/llama-3.1-8b-instruct
+  title_generation:
+    provider: openrouter
+    model: meta-llama/llama-3.1-8b-instruct
+```
+
+The `[hermes] per-run config.yaml env: …` startup log now includes
+`auxiliary=<bool>` so a missed override surfaces in
+`stdout_excerpt` instead of weeks later in cost reports. Nine new
+tests in `hermes-home.test.ts` cover no-override / override /
+slot-collision / partial-merge / defensive-shape paths.
+
 Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
 back. The 0.8.x hardening only kicks in on v3 runs. See the
@@ -394,6 +437,9 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | `env` | object | `{}` | Extra environment variables |
 | `promptTemplate` | string | *(built-in)* | Custom prompt template or `builtin:<name>` (see above) |
 | `paperclipApiUrl` | string | `http://127.0.0.1:3100/api` | Paperclip API base URL |
+| `paperclipMcpTools` | string[] | *(all)* | Per-agent MCP tool allowlist. `[]` = deny-all; absent = register every tool. See "Currently in flight" entry for 0.8.8 above. |
+| `auxiliaryModels` | object | *(none)* | Per-agent override for Hermes' auxiliary-task models (`compression`, `vision`, `session_search`, `title_generation`, …). Passed through to `config.yaml` `auxiliary:` block. Slot-level merge with `~/.hermes/config.yaml`. No-op against Hermes < v2026.4.23. See 0.8.9 entry above. |
+| `preflightSkip` | boolean | `true` | Skip the Hermes spawn when no work is assigned. Set `false` per-agent to opt out. See 0.8.7 entry above. |
 
 ### Prompt Template Variables
 

@@ -18,6 +18,7 @@ import { parse as parseYaml } from "yaml";
 import {
   buildMcpServerSpec,
   buildPerRunHermesHome,
+  mergeAuxiliaryConfig,
   mergeMcpServerIntoConfig,
 } from "./hermes-home.js";
 
@@ -212,6 +213,179 @@ mcp_servers:
     };
     assert.deepEqual(parsed.mcp_servers.paperclip.args, [MCP_CLI]);
     assert.equal(parsed.mcp_servers.paperclip.env.PAPERCLIP_ISSUE_ID, "MAR-30");
+  });
+
+  it("does NOT emit an auxiliary block when neither base nor adapterConfig provides one", () => {
+    // Backwards compat: pre-0.8.9 behaviour. Hermes < v2026.4.23
+    // doesn't read `auxiliary:` at all; we don't want to start
+    // emitting a key it'll later interpret as "deny all auxiliary".
+    const merged = mergeMcpServerIntoConfig(
+      "model: { default: claude }\n",
+      { apiUrl: "x", apiKey: "y" },
+      MCP_CLI,
+    );
+    assert.doesNotMatch(merged, /^auxiliary:/m);
+  });
+
+  it("emits an auxiliary block from adapterConfig override (per-agent cost guard)", () => {
+    const merged = mergeMcpServerIntoConfig(
+      "",
+      {
+        apiUrl: "x",
+        apiKey: "y",
+        auxiliaryModels: {
+          compression: {
+            provider: "openrouter",
+            model: "meta-llama/llama-3.1-8b-instruct",
+          },
+        },
+      },
+      MCP_CLI,
+    );
+    const parsed = parseYaml(merged) as {
+      auxiliary: { compression: { provider: string; model: string } };
+    };
+    assert.equal(parsed.auxiliary.compression.provider, "openrouter");
+    assert.equal(
+      parsed.auxiliary.compression.model,
+      "meta-llama/llama-3.1-8b-instruct",
+    );
+  });
+
+  it("preserves operator's auxiliary slots not overridden by adapterConfig", () => {
+    // ~/.hermes/config.yaml has auxiliary.vision; adapterConfig sets
+    // only auxiliary.compression. Both should survive into the merged
+    // per-run config.yaml.
+    const base = `
+auxiliary:
+  vision:
+    provider: openrouter
+    model: anthropic/claude-3-haiku
+mcp_servers:
+  gmail:
+    command: gmail-mcp
+`;
+    const merged = mergeMcpServerIntoConfig(
+      base,
+      {
+        apiUrl: "x",
+        apiKey: "y",
+        auxiliaryModels: {
+          compression: {
+            provider: "openrouter",
+            model: "meta-llama/llama-3.1-8b-instruct",
+          },
+        },
+      },
+      MCP_CLI,
+    );
+    const parsed = parseYaml(merged) as {
+      auxiliary: {
+        compression: { provider: string; model: string };
+        vision: { provider: string; model: string };
+      };
+      mcp_servers: { gmail: unknown };
+    };
+    assert.equal(parsed.auxiliary.compression.model, "meta-llama/llama-3.1-8b-instruct");
+    assert.equal(parsed.auxiliary.vision.model, "anthropic/claude-3-haiku");
+    assert.ok(parsed.mcp_servers.gmail, "unrelated mcp_servers preserved");
+  });
+
+  it("adapterConfig override wins on slot collisions (per-agent beats global)", () => {
+    // Operator-global cheap default, per-agent override to a different
+    // cheap model. Adapter config wins so per-agent tuning is possible.
+    const base = `
+auxiliary:
+  compression:
+    provider: openrouter
+    model: anthropic/claude-3-haiku
+`;
+    const merged = mergeMcpServerIntoConfig(
+      base,
+      {
+        apiUrl: "x",
+        apiKey: "y",
+        auxiliaryModels: {
+          compression: {
+            provider: "openrouter",
+            model: "meta-llama/llama-3.1-8b-instruct",
+          },
+        },
+      },
+      MCP_CLI,
+    );
+    const parsed = parseYaml(merged) as {
+      auxiliary: { compression: { model: string } };
+    };
+    assert.equal(
+      parsed.auxiliary.compression.model,
+      "meta-llama/llama-3.1-8b-instruct",
+      "per-agent adapterConfig wins over operator-global default",
+    );
+  });
+
+  it("preserves the operator's full auxiliary block when adapterConfig has no override", () => {
+    // Mirror image of the previous test: operator already configured
+    // their global ~/.hermes/config.yaml; adapter doesn't touch it.
+    const base = `
+auxiliary:
+  compression:
+    provider: openrouter
+    model: meta-llama/llama-3.1-8b-instruct
+  vision:
+    provider: openrouter
+    model: anthropic/claude-3-haiku
+`;
+    const merged = mergeMcpServerIntoConfig(
+      base,
+      { apiUrl: "x", apiKey: "y" },
+      MCP_CLI,
+    );
+    const parsed = parseYaml(merged) as {
+      auxiliary: { compression: unknown; vision: unknown };
+    };
+    assert.ok(parsed.auxiliary.compression);
+    assert.ok(parsed.auxiliary.vision);
+  });
+});
+
+describe("mergeAuxiliaryConfig (slot-level merge)", () => {
+  it("returns undefined when both sides are empty (no auxiliary key emitted)", () => {
+    assert.equal(mergeAuxiliaryConfig(undefined, undefined), undefined);
+    assert.equal(mergeAuxiliaryConfig({}, {}), undefined);
+    assert.equal(mergeAuxiliaryConfig(undefined, null), undefined);
+  });
+
+  it("keeps base slots and adds override slots side-by-side", () => {
+    const out = mergeAuxiliaryConfig(
+      { vision: { provider: "openrouter", model: "h" } },
+      { compression: { provider: "openrouter", model: "l" } },
+    );
+    assert.deepEqual(out, {
+      vision: { provider: "openrouter", model: "h" },
+      compression: { provider: "openrouter", model: "l" },
+    });
+  });
+
+  it("override wins on slot collision", () => {
+    const out = mergeAuxiliaryConfig(
+      { compression: { model: "a" } },
+      { compression: { model: "b" } },
+    );
+    assert.equal(out?.compression?.model, "b");
+  });
+
+  it("ignores non-object slot values defensively (operator-edited JSON drift)", () => {
+    // adapterConfig is parsed from operator JSON; a string/array slot
+    // shouldn't end up in config.yaml as YAML scalar where Hermes
+    // expects a map.
+    const out = mergeAuxiliaryConfig(
+      { compression: { model: "a" } },
+      // @ts-expect-error — intentionally bad shape
+      { compression: "not-an-object", vision: ["also-bad"] },
+    );
+    assert.equal(out?.compression?.model, "a");
+    assert.equal(out?.vision, undefined);
   });
 });
 
