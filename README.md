@@ -198,6 +198,39 @@ call. Eleven new tests in `server.test.ts` + `hermes-home.test.ts`
 + `tools.test.ts` cover allowlist filtering, env round-trip, and
 the new `parentIssueId` required/blank rejection paths.
 
+**0.8.10-mil.0 — test-mode model override:** process-wide flag that
+swaps every spawn to a free OpenRouter model without touching any
+agent / company / routine configuration. Set
+`PAPERCLIP_ADAPTER_TEST_MODE=1` on the adapter process (or ECS task
+definition) and ALL agents in that process route to a free model for
+the duration of the run. Original `model` / `provider` /
+`auxiliaryModels` from the agent's adapterConfig are ignored; the
+prompt template, MCP tool allowlist, role/department/skills, and
+routine schedule are unchanged. Defaults to the OpenRouter `openrouter/free`
+meta-router (which auto-selects from free models that support
+tool calling and structured output — required for the
+`builtin:mil-heartbeat-v3` MCP-tool prompt). Pin to a specific slug
+with `PAPERCLIP_ADAPTER_TEST_MODEL=google/gemma-4-31b-it:free` (or
+similar). Auxiliary slots are forced to the same free model so test
+mode is truly $0/run regardless of how Hermes' default-fallback
+chain behaves.
+
+A loud `[hermes] *** TEST MODE ACTIVE *** agent=<name> model=X->Y
+provider=X->Y auxiliary=*->Y (set by PAPERCLIP_ADAPTER_TEST_MODE=1)`
+banner is emitted at the top of every spawn while active, so a
+single grep on production logs confirms (a) test mode is on and
+(b) which agent's config was being used as the base. Off by default;
+set to `0`/unset to revert to per-agent paid models with no
+redeploy required (it's resolved at the start of each spawn). 13 new
+unit tests in `test-mode.test.ts` cover truthiness parsing, default +
+explicit overrides, whitespace trimming, banner formatting, and
+inactive-mode safety.
+
+Use cases: pre-flight smoke testing a new routine before letting it
+fire on the paid model, reproducing a stuck-issue bug without
+spending $5–$15 per attempt, validating that wake-on-assign + MCP +
+status reconciliation work end-to-end after an infra change.
+
 **0.8.9-mil.0 — per-agent auxiliary-models override:** ready-but-
 inert escape hatch for the cost regression in Hermes >= v2026.4.23
 ("v0.11.0"). Hermes makes background LLM calls outside the main
@@ -440,6 +473,17 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | `paperclipMcpTools` | string[] | *(all)* | Per-agent MCP tool allowlist. `[]` = deny-all; absent = register every tool. See "Currently in flight" entry for 0.8.8 above. |
 | `auxiliaryModels` | object | *(none)* | Per-agent override for Hermes' auxiliary-task models (`compression`, `vision`, `session_search`, `title_generation`, …). Passed through to `config.yaml` `auxiliary:` block. Slot-level merge with `~/.hermes/config.yaml`. No-op against Hermes < v2026.4.23. See 0.8.9 entry above. |
 | `preflightSkip` | boolean | `true` | Skip the Hermes spawn when no work is assigned. Set `false` per-agent to opt out. See 0.8.7 entry above. |
+
+### Test-mode environment variables (process-wide override)
+
+Set on the adapter process / ECS task definition. Apply to every spawn while present, regardless of per-agent `adapterConfig`. See 0.8.10 entry above for full semantics.
+
+| Env var | Default | Description |
+|---------|---------|-------------|
+| `PAPERCLIP_ADAPTER_TEST_MODE` | unset | Truthy values (`1`, `true`, `yes`, `on`) activate test-mode override; anything else (including unset) leaves per-agent config untouched. |
+| `PAPERCLIP_ADAPTER_TEST_MODEL` | `openrouter/free` | Model slug to use while test mode is active. The default is OpenRouter's meta-router that auto-selects free models supporting tool calling. |
+| `PAPERCLIP_ADAPTER_TEST_PROVIDER` | `openrouter` | Provider to use while test mode is active. |
+| `PAPERCLIP_ADAPTER_TEST_AUXILIARY_MODEL` | (same as `_TEST_MODEL`) | Optional. Override the auxiliary-slot model independently of the main model. All four slots (`compression`, `vision`, `session_search`, `title_generation`) are forced to this value. |
 
 ### Prompt Template Variables
 

@@ -6,6 +6,25 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.10-mil.0] — 2026-04-25
+
+### Added
+- **Test-mode model override** via `PAPERCLIP_ADAPTER_TEST_MODE=1`. When the env var is truthy (`1`/`true`/`yes`/`on`), the adapter ignores every agent's configured `model` / `provider` / `auxiliaryModels` and routes ALL spawns to a free OpenRouter model for the lifetime of the process. Lets operators run a full smoke test (routines firing, agents waking, MCP tool calls, status reconciliation) against the real production company without burning paid OpenRouter credits.
+- Tunables (all optional):
+  - `PAPERCLIP_ADAPTER_TEST_MODEL` — override model slug (default: `openrouter/free`, the OpenRouter meta-router that auto-picks a free tool-calling model).
+  - `PAPERCLIP_ADAPTER_TEST_PROVIDER` — override provider (default: `openrouter`).
+  - `PAPERCLIP_ADAPTER_TEST_AUXILIARY_MODEL` — override the auxiliary-slot model independently of the main model (defaults to the same value).
+- Loud `[hermes] *** TEST MODE ACTIVE *** agent=<name> model=X->Y provider=X->Y auxiliary=*->Y` banner emitted at the top of every spawn while active, so a single grep confirms the override fired and shows the original config that was overridden.
+- 13 new unit tests in `test-mode.test.ts` covering truthiness parsing, default + explicit overrides, whitespace trimming, rawEnv snapshot, banner formatting, and inactive-mode safety.
+
+### Notes
+- **What test mode does NOT touch:** prompt template (still `builtin:mil-heartbeat-v3`), per-agent role/department/skills, per-agent MCP tool allowlist (`paperclipMcpTools`), routine schedule, Paperclip company configuration. Everything except the LLM endpoint is unchanged.
+- **Off by default.** Existing deployments behave identically until the env var is set on the hermes ECS task definitions.
+- Free-model availability fluctuates on OpenRouter. The `openrouter/free` meta-router default is resilient to specific models being deprecated; for pinned tests use a specific slug like `google/gemma-4-31b-it:free` or `openai/gpt-oss-120b:free`.
+- Auxiliary slots (`compression`, `vision`, `session_search`, `title_generation`) are all forced to the test model when the flag is on, so test mode is truly $0/run regardless of how Hermes' default-fallback chain behaves.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.10-mil.0)
+
 ## [0.8.9-mil.0] — 2026-04-25
 
 ### Added

@@ -68,6 +68,12 @@ import {
   type RunOutcome,
 } from "./result-marker.js";
 
+import {
+  resolveTestModeConfig,
+  formatTestModeBanner,
+  type TestModeConfig,
+} from "./test-mode.js";
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -994,7 +1000,7 @@ export async function execute(
 
   // ── Resolve configuration ──────────────────────────────────────────────
   const hermesCmd = cfgString(config.hermesCommand) || HERMES_CLI;
-  const model = cfgString(config.model) || DEFAULT_MODEL;
+  const configuredModel = cfgString(config.model) || DEFAULT_MODEL;
   const timeoutSec = cfgNumber(config.timeoutSec) || DEFAULT_TIMEOUT_SEC;
   const graceSec = cfgNumber(config.graceSec) || DEFAULT_GRACE_SEC;
   const maxTurns = cfgNumber(config.maxTurnsPerRun);
@@ -1015,9 +1021,9 @@ export async function execute(
   // was added, or if the model was changed without updating provider, the
   // correct provider is still used.
   let detectedConfig: Awaited<ReturnType<typeof detectModel>> | null = null;
-  const explicitProvider = cfgString(config.provider);
+  const configuredProvider = cfgString(config.provider);
 
-  if (!explicitProvider) {
+  if (!configuredProvider) {
     try {
       detectedConfig = await detectModel();
     } catch {
@@ -1025,12 +1031,34 @@ export async function execute(
     }
   }
 
-  const { provider: resolvedProvider, resolvedFrom } = resolveProvider({
-    explicitProvider,
+  const { provider: configuredResolvedProvider, resolvedFrom } = resolveProvider({
+    explicitProvider: configuredProvider,
     detectedProvider: detectedConfig?.provider,
     detectedModel: detectedConfig?.model,
-    model,
+    model: configuredModel,
   });
+
+  // ── Test-mode override (PAPERCLIP_ADAPTER_TEST_MODE=1) ─────────────────
+  // When set, ALL agents in this process route to a free OpenRouter
+  // model regardless of their configured `model` / `provider`. The agent
+  // identity, prompt template, MCP tool allowlist, and routine schedule
+  // are unchanged — only the LLM endpoint is swapped. See
+  // `src/server/test-mode.ts` for the env-var contract and rationale.
+  const testMode: TestModeConfig = resolveTestModeConfig();
+  const model = testMode.active ? testMode.model : configuredModel;
+  const resolvedProvider = testMode.active ? testMode.provider : configuredResolvedProvider;
+  const explicitProvider = testMode.active ? testMode.provider : configuredProvider;
+  if (testMode.active) {
+    await ctx.onLog(
+      "stdout",
+      formatTestModeBanner({
+        cfg: testMode,
+        originalModel: configuredModel,
+        originalProvider: configuredProvider || configuredResolvedProvider || "",
+        agentName: ctx.agent?.name ?? null,
+      }),
+    );
+  }
 
   // ── Resolve per-run context once (canonical source for all fields) ─────
   // See `resolveRunContextField` for the rationale: Paperclip puts per-run
@@ -1167,7 +1195,7 @@ export async function execute(
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
-    `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
+    `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${testMode.active ? "test-mode-override" : resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
   if (resume.sessionId) {
     await ctx.onLog(
@@ -1343,7 +1371,14 @@ export async function execute(
     // route compression / session_search / title_generation through
     // an expensive aggregator model. See `auxiliaryModels` field in
     // src/server/hermes-home.ts for the cost rationale.
-    const auxiliaryModels = cfgAuxiliaryModels(config.auxiliaryModels);
+    //
+    // Test mode (0.8.10+) wins over per-agent config: when the operator
+    // sets PAPERCLIP_ADAPTER_TEST_MODE=1 we force every auxiliary slot
+    // to the same free model the main turn is using, so the smoke test
+    // is truly $0/run regardless of what the agent's adapterConfig says.
+    const auxiliaryModels = testMode.active
+      ? testMode.auxiliary
+      : cfgAuxiliaryModels(config.auxiliaryModels);
 
     perRunHome = await buildPerRunHermesHome(ctx.runId || "no-run-id", {
       apiUrl: paperclipClient.base,
