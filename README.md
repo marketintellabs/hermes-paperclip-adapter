@@ -371,6 +371,42 @@ users running per-issue test mode should bump to 0.8.12-mil.0;** the
 process-wide `PAPERCLIP_ADAPTER_TEST_MODE=1` env var has always worked
 and is unaffected.
 
+**0.8.13-mil.0 — fix `create_sub_issue` orphans + missing wake on
+delegated children:** uncovered during the Stage 3 paid-model retest
+that followed 0.8.12. The MCP `create_sub_issue` tool was sending
+`parentIssueId` in the POST body to Paperclip's
+`POST /companies/:id/issues`. Paperclip's payload schema uses the
+column-aligned name `parentId` and silently drops unknown fields, so
+every successful sub-issue create landed with `parent_id = NULL`. The
+parent never saw its children, status reconciliation didn't propagate,
+and the test-mode-inheritance line in 0.8.11-mil.0 was harmless because
+the tree was disconnected anyway.
+
+The same POST also omitted `status`, so Paperclip defaulted it to
+`backlog`. `backlog` does not fire the assignee's `on_assign`
+heartbeat, so the delegated agent never woke — the work just sat
+there. Once both fixes land together (`parentId: <uuid>` + `status:
+"todo"` in the wire payload), delegation actually delegates: parent
+calls the tool, Paperclip writes a `todo` issue under the right
+`parent_id`, the assignee wakes within seconds via on-assign, and on
+completion the parent's status reconciliation closes the loop.
+
+The bug shipped because the existing happy-path test asserted
+`body.parentIssueId === ...` — which was the field the adapter *sent*
+but not the field Paperclip *read*. The new test fixtures the actual
+API contract:
+
+```js
+assert.equal(body.parentId, "MAR-30");
+assert.equal(body.parentIssueId, undefined);
+assert.equal(body.status, "todo");
+```
+
+The LLM-facing tool input field is still named `parentIssueId`
+(descriptive — pairs with `assigneeAgentId`, `companyId` in tool
+docs); only the wire payload to Paperclip was renamed. Anyone using
+the upstream adapter directly against Paperclip should bump.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:

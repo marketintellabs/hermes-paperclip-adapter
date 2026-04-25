@@ -333,8 +333,47 @@ describe("create_sub_issue", () => {
     const body = calls[0].body as Record<string, unknown>;
     assert.equal(body.title, "Delegated task");
     assert.equal(body.assigneeAgentId, "ag-other");
-    assert.equal(body.parentIssueId, "MAR-30");
     assert.equal(body.priority, 2);
+    // CONTRACT: Paperclip's `POST /companies/:id/issues` body uses the
+    // column-aligned name `parentId` (NOT `parentIssueId`, which is
+    // only the LLM-facing tool input field). MAR-204/206/207
+    // (2026-04-25) regression: the adapter sent `parentIssueId`,
+    // Paperclip silently dropped the unknown field, every sub-issue
+    // landed orphaned (`parent_id = NULL`).
+    assert.equal(body.parentId, "MAR-30");
+    assert.equal(body.parentIssueId, undefined,
+      "must NOT send parentIssueId — Paperclip silently drops unknown fields");
+    // CONTRACT: must explicitly request status="todo". Paperclip
+    // defaults un-specified status to `backlog`, which does NOT
+    // trigger the assignee's on_assign heartbeat — so the delegated
+    // agent never wakes. Same incident as the parentId regression.
+    assert.equal(body.status, "todo",
+      "must send status=todo so the assignee fires on_assign");
+  });
+
+  it("payload contract: parentId + status=todo even when test mode + priority unset", async () => {
+    // Belt-and-suspenders regression: every code path that builds the
+    // POST payload must produce these two fields. Test the path with
+    // no priority and no test-mode — i.e. the most minimal call.
+    const { client, calls } = fakeClient(
+      { companyId: "co-1" },
+      { "POST /companies/co-1/issues": { id: "new-issue" } },
+    );
+    const { ctx } = fakeCtx(client, "MAR-30");
+    await createSubIssueTool.execute(
+      {
+        title: "Minimal delegation",
+        description: "do it",
+        assigneeAgentId: "ag-other",
+        parentIssueId: "MAR-30",
+      },
+      ctx,
+    );
+    const body = calls[0].body as Record<string, unknown>;
+    assert.equal(body.parentId, "MAR-30");
+    assert.equal(body.status, "todo");
+    assert.equal(body.priority, undefined,
+      "priority is opt-in — only sent when the LLM passes it");
   });
 
   it("REJECTS parentless creation — agents can't create top-level work", async () => {

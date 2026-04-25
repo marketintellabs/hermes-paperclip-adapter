@@ -120,11 +120,25 @@ export const createSubIssueTool: ToolDef<typeof inputSchema> = {
     }
 
     try {
+      // NOTE on field names: the LLM-facing input schema field is
+      // `parentIssueId` (descriptive — pairs with `assigneeAgentId`,
+      // `companyId` etc. in tool docs), but the Paperclip
+      // `POST /companies/:id/issues` body uses the column-aligned name
+      // `parentId`. Sending `parentIssueId` makes Paperclip silently
+      // drop the field (unknown property → stripped by zod validator)
+      // and the row lands with `parent_id = NULL`, orphaning the
+      // sub-issue from its tree. Same for `status`: Paperclip defaults
+      // un-specified status to `backlog`, which does NOT trigger the
+      // assignee's `on_assign` heartbeat — so the delegated agent
+      // never wakes. Both invariants are why this tool exists at all
+      // (delegation = immediately-actionable child of a known parent).
+      // See MAR-204/206/207 (2026-04-25) for the regression incident.
       const payload: Record<string, unknown> = {
         title,
         description: finalDescription,
         assigneeAgentId,
-        parentIssueId,
+        parentId: parentIssueId,
+        status: "todo",
       };
       if (priority !== undefined) payload.priority = priority;
 
