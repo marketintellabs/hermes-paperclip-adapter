@@ -406,6 +406,100 @@ describe("create_sub_issue", () => {
     assert.equal(result.isError, true);
     assert.equal(result.retryPolicy, "abort");
   });
+
+  // ─── Test-mode inheritance (0.8.11+) ────────────────────────────────────
+
+  it("test-mode inheritance: prepends marker when PAPERCLIP_TEST_MODE=1", async () => {
+    const prev = process.env.PAPERCLIP_TEST_MODE;
+    process.env.PAPERCLIP_TEST_MODE = "1";
+    process.env.PAPERCLIP_TEST_MODE_SOURCE = "issue-marker";
+    try {
+      const { client, calls } = fakeClient(
+        { companyId: "co-1" },
+        { "POST /companies/co-1/issues": { id: "child-1" } },
+      );
+      const { ctx, logs } = fakeCtx(client, "MAR-30");
+      const result = await createSubIssueTool.execute(
+        {
+          title: "Delegate research",
+          description: "Sector: equities. Top 3 stories.",
+          assigneeAgentId: "ag-research",
+          parentIssueId: "MAR-30",
+        },
+        ctx,
+      );
+      assert.equal(result.isError, undefined);
+      const body = calls[0].body as Record<string, unknown>;
+      assert.match(
+        body.description as string,
+        /^<!-- mode: test -->\n<!-- inherited from parent: .* -->\n\n/,
+      );
+      assert.ok(
+        (body.description as string).endsWith("Sector: equities. Top 3 stories."),
+        "original description must be preserved verbatim after the marker",
+      );
+      assert.ok(logs.some((l) => l.msg === "create_sub_issue test_mode_inherit"));
+    } finally {
+      if (prev === undefined) delete process.env.PAPERCLIP_TEST_MODE;
+      else process.env.PAPERCLIP_TEST_MODE = prev;
+      delete process.env.PAPERCLIP_TEST_MODE_SOURCE;
+    }
+  });
+
+  it("test-mode inheritance: idempotent when parent already wrote the marker", async () => {
+    const prev = process.env.PAPERCLIP_TEST_MODE;
+    process.env.PAPERCLIP_TEST_MODE = "1";
+    try {
+      const { client, calls } = fakeClient(
+        { companyId: "co-1" },
+        { "POST /companies/co-1/issues": { id: "child-2" } },
+      );
+      const { ctx } = fakeCtx(client, "MAR-30");
+      const original = "<!-- mode: test -->\n\nDo the thing in test mode.";
+      await createSubIssueTool.execute(
+        {
+          title: "Delegate",
+          description: original,
+          assigneeAgentId: "ag-research",
+          parentIssueId: "MAR-30",
+        },
+        ctx,
+      );
+      const body = calls[0].body as Record<string, unknown>;
+      // No double-prepend — the body that hits Paperclip is exactly
+      // what the parent wrote, with NO `inherited from parent` line.
+      assert.equal(body.description, original);
+    } finally {
+      if (prev === undefined) delete process.env.PAPERCLIP_TEST_MODE;
+      else process.env.PAPERCLIP_TEST_MODE = prev;
+    }
+  });
+
+  it("test-mode inheritance: no-op when PAPERCLIP_TEST_MODE is unset (production)", async () => {
+    const prev = process.env.PAPERCLIP_TEST_MODE;
+    delete process.env.PAPERCLIP_TEST_MODE;
+    try {
+      const { client, calls } = fakeClient(
+        { companyId: "co-1" },
+        { "POST /companies/co-1/issues": { id: "child-3" } },
+      );
+      const { ctx } = fakeCtx(client, "MAR-30");
+      await createSubIssueTool.execute(
+        {
+          title: "Real prod work",
+          description: "Sector: macro.",
+          assigneeAgentId: "ag-research",
+          parentIssueId: "MAR-30",
+        },
+        ctx,
+      );
+      const body = calls[0].body as Record<string, unknown>;
+      assert.equal(body.description, "Sector: macro.");
+      assert.ok(!(body.description as string).includes("<!-- mode:"));
+    } finally {
+      if (prev !== undefined) process.env.PAPERCLIP_TEST_MODE = prev;
+    }
+  });
 });
 
 // ─── update_issue_status (scope-restricted terminal transition) ───────────

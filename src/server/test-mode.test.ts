@@ -13,6 +13,8 @@ import assert from "node:assert/strict";
 import {
   isTestModeActive,
   resolveTestModeConfig,
+  resolveTestMode,
+  probeIssueMode,
   formatTestModeBanner,
   DEFAULT_TEST_MODEL,
   DEFAULT_TEST_PROVIDER,
@@ -151,7 +153,7 @@ describe("test-mode: formatTestModeBanner", () => {
     );
   });
 
-  it("includes original + override model and provider", () => {
+  it("includes original + override model and provider, source=env", () => {
     const cfg = resolveTestModeConfig({ PAPERCLIP_ADAPTER_TEST_MODE: "1" });
     const banner = formatTestModeBanner({
       cfg,
@@ -163,7 +165,8 @@ describe("test-mode: formatTestModeBanner", () => {
     assert.match(banner, /agent=ceo/);
     assert.ok(banner.includes("z-ai/glm-4.7->" + DEFAULT_TEST_MODEL));
     assert.ok(banner.includes("openrouter->" + DEFAULT_TEST_PROVIDER));
-    assert.match(banner, /PAPERCLIP_ADAPTER_TEST_MODE=1/);
+    assert.match(banner, /source=env/);
+    assert.match(banner, /detail="PAPERCLIP_ADAPTER_TEST_MODE=1"/);
   });
 
   it("handles missing original values gracefully", () => {
@@ -175,5 +178,207 @@ describe("test-mode: formatTestModeBanner", () => {
     });
     assert.ok(banner.includes("(default)->"));
     assert.ok(banner.includes("(auto)->"));
+  });
+});
+
+describe("test-mode: probeIssueMode (per-issue marker / intent)", () => {
+  it("returns inactive for empty / undefined / non-matching issue", () => {
+    assert.equal(probeIssueMode({}).active, false);
+    assert.equal(probeIssueMode({ title: "", body: "" }).active, false);
+    assert.equal(
+      probeIssueMode({
+        title: "Daily content pipeline",
+        body: "Run the editorial calendar item for today.",
+      }).active,
+      false,
+    );
+  });
+
+  it("detects explicit HTML-comment marker in body (preferred form)", () => {
+    const r = probeIssueMode({
+      title: "Daily content pipeline",
+      body: "<!-- mode: test -->\n\nRun a quick check.",
+    });
+    assert.equal(r.active, true);
+    assert.equal(r.source, "issue-marker");
+    assert.match(r.sourceDetail || "", /<!--\s*mode\s*:\s*test\s*-->/i);
+  });
+
+  it("accepts marker in title too (rare but valid)", () => {
+    const r = probeIssueMode({
+      title: "Daily pipeline <!-- mode: test -->",
+      body: "Whatever.",
+    });
+    assert.equal(r.active, true);
+    assert.equal(r.source, "issue-marker");
+  });
+
+  it("matches whitespace and case variants of the marker", () => {
+    for (const v of [
+      "<!--mode:test-->",
+      "<!-- MODE: TEST -->",
+      "<!--   mode  :  test   -->",
+    ]) {
+      assert.equal(
+        probeIssueMode({ body: `prefix ${v} suffix` }).active,
+        true,
+        `expected match for ${v}`,
+      );
+    }
+  });
+
+  it("detects 'smoketest' / 'smoke test' / 'smoke-test' intent in title", () => {
+    for (const v of ["smoketest", "smoke test", "smoke-test", "Smoketest", "SMOKE TEST"]) {
+      const r = probeIssueMode({ title: `Run a ${v} of the pipeline`, body: "" });
+      assert.equal(r.active, true, `expected match for title containing ${v}`);
+      assert.equal(r.source, "issue-intent");
+      assert.ok((r.sourceDetail || "").startsWith("title:"));
+    }
+  });
+
+  it("detects 'test mode' intent in body", () => {
+    const r = probeIssueMode({
+      title: "End-to-end check",
+      body: "Run the pipeline in test mode so we don't burn paid credits.",
+    });
+    assert.equal(r.active, true);
+    assert.equal(r.source, "issue-intent");
+    assert.ok((r.sourceDetail || "").startsWith("body:"));
+  });
+
+  it("detects 'low-cost validation' intent", () => {
+    const r = probeIssueMode({
+      title: "Run a low-cost validation pass",
+      body: "",
+    });
+    assert.equal(r.active, true);
+    assert.equal(r.source, "issue-intent");
+  });
+
+  it("explicit marker beats intent (marker wins on conflict)", () => {
+    const r = probeIssueMode({
+      title: "Smoketest the pipeline",
+      body: "<!-- mode: test -->\nfoo",
+    });
+    assert.equal(r.active, true);
+    assert.equal(r.source, "issue-marker");
+  });
+
+  it("does NOT match unrelated uses of 'test' (false-positive guard)", () => {
+    for (const body of [
+      "Test the hypothesis that demand drops on Mondays.",
+      "QA test this approach with the editorial team.",
+      "Run unit tests after the refactor.",
+      "Backtest the strategy against last quarter.",
+    ]) {
+      assert.equal(
+        probeIssueMode({ body }).active,
+        false,
+        `should NOT match: ${body}`,
+      );
+    }
+  });
+});
+
+describe("test-mode: resolveTestMode (combined env + issue)", () => {
+  it("env wins over issue intent (operator big-hammer)", () => {
+    const cfg = resolveTestMode({
+      env: {
+        PAPERCLIP_ADAPTER_TEST_MODE: "1",
+        PAPERCLIP_ADAPTER_TEST_MODEL: "google/gemma-4-31b-it:free",
+      },
+      title: "Production daily content pipeline",
+      body: "Real production work.",
+    });
+    assert.equal(cfg.active, true);
+    assert.equal(cfg.source, "env");
+    assert.equal(cfg.model, "google/gemma-4-31b-it:free");
+  });
+
+  it("falls through to issue marker when env not set", () => {
+    const cfg = resolveTestMode({
+      env: {},
+      title: "Smoketest",
+      body: "<!-- mode: test -->",
+    });
+    assert.equal(cfg.active, true);
+    assert.equal(cfg.source, "issue-marker");
+    assert.equal(cfg.model, DEFAULT_TEST_MODEL);
+    assert.equal(cfg.provider, DEFAULT_TEST_PROVIDER);
+  });
+
+  it("falls through to issue intent when no marker", () => {
+    const cfg = resolveTestMode({
+      env: {},
+      title: "Run a smoketest of the daily pipeline",
+      body: "Just want to confirm wake-on-assign + MCP work end-to-end.",
+    });
+    assert.equal(cfg.active, true);
+    assert.equal(cfg.source, "issue-intent");
+  });
+
+  it("returns inactive when neither env nor issue trips test mode", () => {
+    const cfg = resolveTestMode({
+      env: {},
+      title: "Daily content pipeline — Friday week-in-review",
+      body: "Synthesise the top 5 stories from this week and publish.",
+    });
+    assert.equal(cfg.active, false);
+    assert.equal(cfg.model, "");
+  });
+
+  it("issue-source overrides still produce the same auxiliary slot config", () => {
+    const cfg = resolveTestMode({
+      env: { PAPERCLIP_ADAPTER_TEST_AUXILIARY_MODEL: "google/gemma-4-26b-a4b:free" },
+      title: "Smoketest",
+      body: "",
+    });
+    assert.equal(cfg.active, true);
+    assert.equal(cfg.source, "issue-intent");
+    for (const slot of Object.values(cfg.auxiliary)) {
+      assert.equal(slot.model, "google/gemma-4-26b-a4b:free");
+    }
+  });
+
+  it("treats null/undefined title and body safely", () => {
+    const a = resolveTestMode({ env: {}, title: null, body: null });
+    const b = resolveTestMode({ env: {}, title: undefined, body: undefined });
+    const c = resolveTestMode({ env: {} });
+    assert.equal(a.active, false);
+    assert.equal(b.active, false);
+    assert.equal(c.active, false);
+  });
+});
+
+describe("test-mode: banner reflects source for per-issue activation", () => {
+  it("renders source=issue-marker with detail when marker fires", () => {
+    const cfg = resolveTestMode({
+      env: {},
+      title: "Smoketest the pipeline",
+      body: "<!-- mode: test -->",
+    });
+    const banner = formatTestModeBanner({
+      cfg,
+      originalModel: "z-ai/glm-4.7",
+      originalProvider: "openrouter",
+      agentName: "ceo",
+    });
+    assert.match(banner, /source=issue-marker/);
+    assert.match(banner, /detail="<!--/);
+  });
+
+  it("renders source=issue-intent with phrase detail when intent fires", () => {
+    const cfg = resolveTestMode({
+      env: {},
+      title: "Run a low-cost validation today",
+      body: "",
+    });
+    const banner = formatTestModeBanner({
+      cfg,
+      originalModel: "z-ai/glm-4.7",
+      originalProvider: "openrouter",
+    });
+    assert.match(banner, /source=issue-intent/);
+    assert.match(banner, /low-cost validation/);
   });
 });

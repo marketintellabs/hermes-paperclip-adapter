@@ -89,10 +89,40 @@ export const createSubIssueTool: ToolDef<typeof inputSchema> = {
       throw err;
     }
 
+    // Test-mode inheritance: when this MCP server is running inside an
+    // adapter spawn that resolved to test mode (env-var or per-issue),
+    // the adapter sets PAPERCLIP_TEST_MODE=1 on our env. Prepend a
+    // marker to the sub-issue body so the assignee agent — which will
+    // probe its own assigned issue title/body to decide its mode —
+    // automatically inherits test mode without any cross-process
+    // channel beyond the issue text itself.
+    //
+    // Idempotent: if the parent agent already wrote the marker into
+    // `description` we don't double-add. The marker that ends up in the
+    // Paperclip UI is the same one the operator would type by hand,
+    // which keeps the audit trail clean.
+    let finalDescription = description;
+    if (process.env.PAPERCLIP_TEST_MODE === "1") {
+      const ALREADY = /<!--\s*mode\s*:\s*test\s*-->/i;
+      if (!ALREADY.test(description)) {
+        const src = process.env.PAPERCLIP_TEST_MODE_SOURCE_DETAIL ||
+          process.env.PAPERCLIP_TEST_MODE_SOURCE ||
+          "parent run";
+        finalDescription =
+          `<!-- mode: test -->\n` +
+          `<!-- inherited from parent: ${src} -->\n\n` +
+          description;
+        log("create_sub_issue test_mode_inherit", {
+          source: process.env.PAPERCLIP_TEST_MODE_SOURCE,
+          parentIssueId,
+        });
+      }
+    }
+
     try {
       const payload: Record<string, unknown> = {
         title,
-        description,
+        description: finalDescription,
         assigneeAgentId,
         parentIssueId,
       };

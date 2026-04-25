@@ -69,7 +69,7 @@ import {
 } from "./result-marker.js";
 
 import {
-  resolveTestModeConfig,
+  resolveTestMode,
   formatTestModeBanner,
   type TestModeConfig,
 } from "./test-mode.js";
@@ -1038,13 +1038,32 @@ export async function execute(
     model: configuredModel,
   });
 
-  // ── Test-mode override (PAPERCLIP_ADAPTER_TEST_MODE=1) ─────────────────
-  // When set, ALL agents in this process route to a free OpenRouter
-  // model regardless of their configured `model` / `provider`. The agent
-  // identity, prompt template, MCP tool allowlist, and routine schedule
-  // are unchanged — only the LLM endpoint is swapped. See
-  // `src/server/test-mode.ts` for the env-var contract and rationale.
-  const testMode: TestModeConfig = resolveTestModeConfig();
+  // ── Resolve per-run context once (canonical source for all fields) ─────
+  // See `resolveRunContextField` for the rationale: Paperclip puts per-run
+  // data on ctx.context, not ctx.config. We resolve once here and thread
+  // the snapshot through prompt-building, env wiring, preRunClaim, and
+  // reconcileOutcome so no downstream reader silently re-reads the wrong
+  // bag.
+  const run = buildRunContext(ctx);
+
+  // ── Test-mode override (env-var OR per-issue) ──────────────────────────
+  // Two activation paths, evaluated in priority order (env wins):
+  //   1. PAPERCLIP_ADAPTER_TEST_MODE=1 on the process — operator
+  //      big-hammer that flips ALL spawns in this process to free
+  //      OpenRouter models for the duration of the deploy.
+  //   2. Per-issue marker / intent in title or body — CEO-driven
+  //      smoketest of one specific work tree. Sub-issues created by
+  //      MCP `create_sub_issue` while in this mode automatically
+  //      inherit the marker (see mcp/tools/create-sub-issue.ts), so
+  //      delegated work stays on free models too.
+  //
+  // Either path swaps only the LLM endpoint; agent identity, prompt
+  // template, MCP allowlist, and routines are unchanged. See
+  // `src/server/test-mode.ts` for the full contract.
+  const testMode: TestModeConfig = resolveTestMode({
+    title: run.taskTitle,
+    body: run.taskBody,
+  });
   const model = testMode.active ? testMode.model : configuredModel;
   const resolvedProvider = testMode.active ? testMode.provider : configuredResolvedProvider;
   const explicitProvider = testMode.active ? testMode.provider : configuredProvider;
@@ -1059,14 +1078,6 @@ export async function execute(
       }),
     );
   }
-
-  // ── Resolve per-run context once (canonical source for all fields) ─────
-  // See `resolveRunContextField` for the rationale: Paperclip puts per-run
-  // data on ctx.context, not ctx.config. We resolve once here and thread
-  // the snapshot through prompt-building, env wiring, preRunClaim, and
-  // reconcileOutcome so no downstream reader silently re-reads the wrong
-  // bag.
-  const run = buildRunContext(ctx);
 
   // ── Build prompt ───────────────────────────────────────────────────────
   const prompt = buildPrompt(ctx, config, run);
@@ -1389,6 +1400,13 @@ export async function execute(
       runId: ctx.runId ?? null,
       allowedTools: paperclipMcpTools ?? null,
       auxiliaryModels: auxiliaryModels ?? null,
+      testMode: testMode.active
+        ? {
+            active: true,
+            source: testMode.source,
+            sourceDetail: testMode.sourceDetail,
+          }
+        : null,
     });
     env.HERMES_HOME = perRunHome.path;
     // Note: setting telemetry vars on the adapter's own env does NOT help —

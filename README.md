@@ -198,6 +198,48 @@ call. Eleven new tests in `server.test.ts` + `hermes-home.test.ts`
 + `tools.test.ts` cover allowlist filtering, env round-trip, and
 the new `parentIssueId` required/blank rejection paths.
 
+**0.8.11-mil.0 — per-issue test mode + sub-issue inheritance:** day-to-day
+UX layer on top of 0.8.10. Operators (or the CEO agent) can flip a
+*single* issue into test mode by either:
+
+- including the explicit machine-readable marker `<!-- mode: test -->`
+  in the issue body (canonical, zero false-positive risk), or
+- using a natural-language intent phrase (`smoketest`, `smoke test`,
+  `smoke-test`, `test mode`, `low-cost validation`, `test flow`) anywhere
+  in the issue title or body.
+
+The adapter probes each spawn's task title + body and, if either path
+trips, routes that one work tree to the free OpenRouter model — every
+other issue runs on its configured paid model. This closes the gap from
+0.8.10's process-wide flag, which required a redeploy to flip on/off.
+
+**Sub-issue inheritance.** When the MCP `create_sub_issue` tool runs
+inside an adapter spawn that resolved to test mode, the adapter sets
+`PAPERCLIP_TEST_MODE=1` on the MCP subprocess env and the tool prepends
+`<!-- mode: test -->` plus an `inherited from parent: …` provenance
+line to the sub-issue body before posting. The woken sub-agent then
+probes its own issue and inherits test mode automatically — no
+cross-process channel beyond the issue text the operator can see in the
+Paperclip UI. Idempotent: parents that already wrote the marker into
+their description don't double-add.
+
+**Source-of-truth in the banner.** The `*** TEST MODE ACTIVE ***` line
+now ends with `source=<env|issue-marker|issue-intent> detail="<phrase
+or marker>"` so a single grep answers "where did this activation come
+from?" — operator big-hammer, CEO's smoketest issue, or inherited from
+a parent run.
+
+**Activation priority:** env var > issue-marker > issue-intent > prod.
+Env wins because it's the incident-response lever; per-issue activation
+is the day-to-day UX. Recommended CEO prompt: *"Run a smoketest of the
+system in low-cost validation mode. Validate pipeline integrity
+end-to-end (wake-on-assign, MCP tool calls, status reconciliation,
+sub-agent delegation). Don't worry about output quality — free models
+are inconsistent under tool-use load."* Either phrase trips the
+override, sub-agents inherit automatically. 24 new tests cover marker
+detection, intent matching with false-positive guards, env-vs-issue
+precedence, MCP env emission, sub-issue prepending, and idempotency.
+
 **0.8.10-mil.0 — test-mode model override:** process-wide flag that
 swaps every spawn to a free OpenRouter model without touching any
 agent / company / routine configuration. Set
@@ -216,8 +258,10 @@ mode is truly $0/run regardless of how Hermes' default-fallback
 chain behaves.
 
 A loud `[hermes] *** TEST MODE ACTIVE *** agent=<name> model=X->Y
-provider=X->Y auxiliary=*->Y (set by PAPERCLIP_ADAPTER_TEST_MODE=1)`
-banner is emitted at the top of every spawn while active, so a
+provider=X->Y auxiliary=*->Y source=env detail="…"` banner is emitted
+at the top of every spawn while active (the `source` field was added
+in 0.8.11; in 0.8.10 the banner ended with `(set by
+PAPERCLIP_ADAPTER_TEST_MODE=1)` instead), so a
 single grep on production logs confirms (a) test mode is on and
 (b) which agent's config was being used as the base. Off by default;
 set to `0`/unset to revert to per-agent paid models with no
@@ -474,9 +518,22 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | `auxiliaryModels` | object | *(none)* | Per-agent override for Hermes' auxiliary-task models (`compression`, `vision`, `session_search`, `title_generation`, …). Passed through to `config.yaml` `auxiliary:` block. Slot-level merge with `~/.hermes/config.yaml`. No-op against Hermes < v2026.4.23. See 0.8.9 entry above. |
 | `preflightSkip` | boolean | `true` | Skip the Hermes spawn when no work is assigned. Set `false` per-agent to opt out. See 0.8.7 entry above. |
 
-### Test-mode environment variables (process-wide override)
+### Test mode (per-issue UX + process-wide big-hammer)
 
-Set on the adapter process / ECS task definition. Apply to every spawn while present, regardless of per-agent `adapterConfig`. See 0.8.10 entry above for full semantics.
+Two ways to flip the adapter into test mode (both produce the same overrides — only the LLM endpoint is swapped to a free OpenRouter model). Activation priority: env > issue-marker > issue-intent > production.
+
+**1. Per-issue (recommended day-to-day, 0.8.11+).** Add ANY of the following to the issue title or body:
+
+- The explicit marker `<!-- mode: test -->` (canonical, zero false-positive risk).
+- One of the intent phrases: `smoketest`, `smoke test`, `smoke-test`, `test mode`, `low-cost validation`, `test flow`.
+
+The adapter probes each spawn's task title + body and routes that one issue's work tree to the free model. Sub-issues created via `create_sub_issue` while in this mode automatically inherit the marker, so the whole delegation tree stays free until it terminates.
+
+CEO prompt that reliably trips the override:
+
+> *Run a smoketest of the system in low-cost validation mode. Validate pipeline integrity end-to-end (wake-on-assign, MCP tool calls, status reconciliation, sub-agent delegation). Don't worry about output quality — free models are inconsistent under tool-use load.*
+
+**2. Process-wide env vars (operator big-hammer, incident response).** Set on the adapter process / ECS task definition. Apply to every spawn while present, regardless of per-agent `adapterConfig` or issue contents. See the 0.8.10 entry above for full semantics.
 
 | Env var | Default | Description |
 |---------|---------|-------------|
@@ -484,6 +541,8 @@ Set on the adapter process / ECS task definition. Apply to every spawn while pre
 | `PAPERCLIP_ADAPTER_TEST_MODEL` | `openrouter/free` | Model slug to use while test mode is active. The default is OpenRouter's meta-router that auto-selects free models supporting tool calling. |
 | `PAPERCLIP_ADAPTER_TEST_PROVIDER` | `openrouter` | Provider to use while test mode is active. |
 | `PAPERCLIP_ADAPTER_TEST_AUXILIARY_MODEL` | (same as `_TEST_MODEL`) | Optional. Override the auxiliary-slot model independently of the main model. All four slots (`compression`, `vision`, `session_search`, `title_generation`) are forced to this value. |
+
+The `*** TEST MODE ACTIVE ***` banner emitted at the top of each spawn includes a `source=<env|issue-marker|issue-intent>` field plus the matched marker / phrase, so a single grep tells you which path activated test mode for that run.
 
 ### Prompt Template Variables
 

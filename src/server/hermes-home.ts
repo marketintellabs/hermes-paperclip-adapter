@@ -117,6 +117,22 @@ export interface PaperclipMcpScope {
    * expensive).
    */
   auxiliaryModels?: AuxiliaryModelsConfig | null;
+  /**
+   * Test-mode signal for the MCP subprocess. When `active === true` the
+   * adapter sets `PAPERCLIP_TEST_MODE=1` (plus `_SOURCE`) on the
+   * mcp_servers.paperclip.env block so the MCP server's
+   * `create_sub_issue` tool can see it and prepend the inheritance
+   * marker `<!-- mode: test (inherited from parent) -->` to the
+   * sub-issue body. That way a sub-agent waking on the new issue
+   * detects test mode via its own body probe and inherits the override
+   * without any cross-process channel beyond the issue text itself —
+   * which is also what the operator sees in the Paperclip UI.
+   */
+  testMode?: {
+    active: boolean;
+    source?: string;
+    sourceDetail?: string;
+  } | null;
 }
 
 export interface PerRunHermesHome {
@@ -192,6 +208,20 @@ export function buildMcpServerSpec(
   // "register every tool" in the MCP server.
   if (Array.isArray(scope.allowedTools)) {
     env.PAPERCLIP_MCP_TOOLS = scope.allowedTools.join(",");
+  }
+  // Test-mode signal for cross-issue inheritance. The MCP server's
+  // create_sub_issue handler reads PAPERCLIP_TEST_MODE and, when set,
+  // prepends a marker to the sub-issue body so the woken sub-agent
+  // inherits test mode via its own body probe. _SOURCE is informational
+  // (audit log clarity); only PAPERCLIP_TEST_MODE flips behaviour.
+  if (scope.testMode?.active) {
+    env.PAPERCLIP_TEST_MODE = "1";
+    if (scope.testMode.source) {
+      env.PAPERCLIP_TEST_MODE_SOURCE = scope.testMode.source;
+    }
+    if (scope.testMode.sourceDetail) {
+      env.PAPERCLIP_TEST_MODE_SOURCE_DETAIL = scope.testMode.sourceDetail;
+    }
   }
 
   return {

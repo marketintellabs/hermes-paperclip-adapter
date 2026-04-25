@@ -147,6 +147,49 @@ describe("buildMcpServerSpec", () => {
     const env = (spec as { env: Record<string, string> }).env;
     assert.equal(env.PAPERCLIP_MCP_TOOLS, undefined);
   });
+
+  it("emits PAPERCLIP_TEST_MODE=1 (+source/detail) when testMode.active", () => {
+    const spec = buildMcpServerSpec(
+      {
+        apiUrl: "http://pc/api",
+        apiKey: "jwt",
+        testMode: {
+          active: true,
+          source: "issue-marker",
+          sourceDetail: "<!-- mode: test -->",
+        },
+      },
+      MCP_CLI,
+    );
+    const env = (spec as { env: Record<string, string> }).env;
+    assert.equal(env.PAPERCLIP_TEST_MODE, "1");
+    assert.equal(env.PAPERCLIP_TEST_MODE_SOURCE, "issue-marker");
+    assert.equal(env.PAPERCLIP_TEST_MODE_SOURCE_DETAIL, "<!-- mode: test -->");
+  });
+
+  it("omits PAPERCLIP_TEST_MODE entirely when testMode is null/undefined", () => {
+    const a = buildMcpServerSpec(
+      { apiUrl: "http://pc/api", apiKey: "jwt" },
+      MCP_CLI,
+    );
+    const b = buildMcpServerSpec(
+      { apiUrl: "http://pc/api", apiKey: "jwt", testMode: null },
+      MCP_CLI,
+    );
+    const c = buildMcpServerSpec(
+      {
+        apiUrl: "http://pc/api",
+        apiKey: "jwt",
+        testMode: { active: false },
+      },
+      MCP_CLI,
+    );
+    for (const spec of [a, b, c]) {
+      const env = (spec as { env: Record<string, string> }).env;
+      assert.equal(env.PAPERCLIP_TEST_MODE, undefined);
+      assert.equal(env.PAPERCLIP_TEST_MODE_SOURCE, undefined);
+    }
+  });
 });
 
 describe("mergeMcpServerIntoConfig", () => {

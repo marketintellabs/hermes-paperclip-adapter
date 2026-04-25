@@ -6,6 +6,22 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.11-mil.0] — 2026-04-25
+
+### Added
+- **Per-issue test mode** (CEO-facing UX). Operators (or the CEO agent) can now flip a *single* issue into test mode by including either an explicit machine-readable marker `<!-- mode: test -->` in the issue body, or a natural-language intent phrase (`smoketest`, `smoke test`, `smoke-test`, `test mode`, `low-cost validation`, `test flow`) anywhere in the title or body. The adapter probes each spawn's task title + body and routes that one work tree to the free OpenRouter model — production work on other issues is unaffected. Closes the gap from 0.8.10's process-wide flag, which required a redeploy to flip on/off.
+- **Sub-issue inheritance.** When the MCP `create_sub_issue` tool runs inside an adapter spawn that resolved to test mode, the adapter sets `PAPERCLIP_TEST_MODE=1` on the MCP subprocess env, and the tool prepends `<!-- mode: test -->` plus an `inherited from parent: …` provenance line to the sub-issue body before posting to Paperclip. The woken sub-agent then probes its own assigned issue and inherits test mode automatically — no cross-process channel beyond the issue text the operator can see in the Paperclip UI. Idempotent: parents that already wrote the marker into their description don't double-add.
+- **Source-of-truth diagnostic banner.** The `*** TEST MODE ACTIVE ***` line now ends with `source=<env|issue-marker|issue-intent> detail="<phrase or marker>"` so a single grep on production logs answers "where did this test-mode activation come from?" — operator big-hammer, CEO's smoketest issue, or inherited from a parent run.
+- 24 new tests across `test-mode.test.ts`, `tools.test.ts`, and `hermes-home.test.ts` covering: marker detection (whitespace + case variants), intent phrase matching, false-positive guards (don't match "test the hypothesis" / "QA test" / "backtest"), env-vs-issue precedence, MCP env-var emission, sub-issue marker prepending, and idempotency.
+
+### Notes
+- **Activation priority:** `PAPERCLIP_ADAPTER_TEST_MODE=1` env var (operator big-hammer, process-wide) > issue-marker > issue-intent > production. Env wins because it's the incident-response lever; per-issue activation is the day-to-day UX.
+- **What test mode still does NOT touch:** prompt template, per-agent role/department/skills, per-agent MCP tool allowlist, routine schedule. Same overrides as 0.8.10 — only the LLM endpoint is swapped.
+- **Recommended CEO prompt snippet:** "Run a smoketest of the system in low-cost validation mode. Validate pipeline integrity end-to-end (wake-on-assign, MCP tool calls, status reconciliation, sub-agent delegation). Don't worry about output quality — free models are inconsistent under tool-use load." Either phrase ("smoketest" or "low-cost validation") trips the override; sub-agents inherit automatically.
+- **False-positive surface is deliberately conservative.** "Test" alone won't match — only the explicit phrases above. Add carefully if you extend; each addition raises the chance of flipping a real production issue to free models because of unrelated copy.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.11-mil.0)
+
 ## [0.8.10-mil.0] — 2026-04-25
 
 ### Added
