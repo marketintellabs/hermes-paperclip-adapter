@@ -6,6 +6,16 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.12-mil.1] — 2026-04-25
+
+### Changed
+- **README updated to include the 0.8.12 entry.** The 0.8.12-mil.0 tarball shipped without a "Currently in flight" entry for itself in the README, so the npmjs.com package page still listed 0.8.11-mil.0 as the most recent feature even though the version selector showed 0.8.12-mil.0 at the top. Added the entry; republished so npm re-renders the README. (npm only re-renders the package page README on a fresh publish — version + dist-tag changes alone don't refresh it.)
+
+### Notes
+- Docs-only release. No code changes from `0.8.12-mil.0`. Existing deployments do not need to redeploy.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.12-mil.1)
+
 ## [0.8.12-mil.0] — 2026-04-25
 
 ### Fixed

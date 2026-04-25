@@ -324,6 +324,53 @@ back. The 0.8.x hardening only kicks in on v3 runs. See the
 [fork divergence list](./UPSTREAM.md#divergence-from-upstream)
 (items 8–15) for the implementation sketch.
 
+**0.8.12-mil.0 — fix per-issue test mode silently failing on the wake
+path:** the per-issue marker / intent feature shipped in 0.8.11-mil.0
+never actually fired in production. Paperclip's heartbeat wake snapshot
+puts the issue title at `ctx.context.paperclipWake.issue.title` (NOT on
+a top-level `taskTitle`) and **omits the issue body entirely** (the
+harness assumes the agent will fetch it via the MCP `get_issue` tool).
+The adapter's `resolveTestMode` was always called with `body=""`, so
+the `<!-- mode: test -->` regex never matched. Every "smoketest" issue
+silently downgraded to the configured paid model.
+
+`execute()` now runs a new `enrichRunContext()` step before test-mode
+resolution. Two layers, in order:
+
+1. **Wake-snapshot title fallback** (synchronous, no I/O) — when the
+   canonical `ctx.context → ctx.config` resolver returns empty for
+   `taskTitle`, fall back to `ctx.context.paperclipWake.issue.title`.
+   New `provenance: "wake-snapshot"` distinguishes this from
+   `context` / `config` / `missing` in the diagnostic log.
+2. **Authenticated body fetch** — when `taskBody` is still empty AND
+   `ctx.authToken` (the per-run JWT Paperclip already mints) AND a
+   reachable `paperclipApiUrl` are available, do
+   `GET /api/issues/<taskId>` with a 3-second timeout. New
+   `provenance: "api"`. Failure modes (`no_auth_token`, `http_404`,
+   `timeout`, network error) are non-fatal — the run continues exactly
+   as it would have on 0.8.11.
+
+New diagnostic line on every successful enrichment:
+
+```
+[hermes] enriched run context: taskTitle=wake-snapshot,taskBody=api (api=18ms)
+```
+
+**Side effect (positive):** the `mil-heartbeat-v3` prompt template's
+`{{taskBody}}` placeholder always rendered to `""` before this fix.
+With enrichment it now expands to the real description, so agents see
+the body in their first prompt instead of having to call MCP
+`get_issue` to fetch it. One fewer round-trip per wake; net token cost
+is roughly neutral (the body was going into context either way, just
+one MCP turn later).
+
+12 new tests in `run-context.test.ts` describe the actual production
+context shape so future changes to the `ctx.context → taskBody`
+plumbing fail unit tests, not end-to-end smoketests. **0.8.11-mil.x
+users running per-issue test mode should bump to 0.8.12-mil.0;** the
+process-wide `PAPERCLIP_ADAPTER_TEST_MODE=1` env var has always worked
+and is unaffected.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
