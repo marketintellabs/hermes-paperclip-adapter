@@ -6,6 +6,17 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.11-mil.1] — 2026-04-25
+
+### Changed
+- **README ordering fix.** The "Currently in flight (0.8.x)" section in the README listed `0.8.9` / `0.8.10` / `0.8.11` in reverse-chronological order, breaking the chronological flow established by entries `0.8.0` through `0.8.8` above them. Re-sorted so every entry now appears in ascending version order — `0.8.0 → 0.8.1 → … → 0.8.10 → 0.8.11` — matching how the section was originally laid out and how the npmjs.com package page reads top-to-bottom. Pure docs change; the GitHub Releases page, which is reverse-chronological by date, was already correct.
+
+### Notes
+- Docs-only release. No code changes from `0.8.11-mil.0`. Existing deployments do not need to redeploy.
+- Republished to npm so the package page on npmjs.com picks up the corrected README. (npm only re-renders the README on new version publish.)
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.11-mil.1)
+
 ## [0.8.11-mil.0] — 2026-04-25
 
 ### Added

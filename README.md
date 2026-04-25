@@ -198,83 +198,6 @@ call. Eleven new tests in `server.test.ts` + `hermes-home.test.ts`
 + `tools.test.ts` cover allowlist filtering, env round-trip, and
 the new `parentIssueId` required/blank rejection paths.
 
-**0.8.11-mil.0 — per-issue test mode + sub-issue inheritance:** day-to-day
-UX layer on top of 0.8.10. Operators (or the CEO agent) can flip a
-*single* issue into test mode by either:
-
-- including the explicit machine-readable marker `<!-- mode: test -->`
-  in the issue body (canonical, zero false-positive risk), or
-- using a natural-language intent phrase (`smoketest`, `smoke test`,
-  `smoke-test`, `test mode`, `low-cost validation`, `test flow`) anywhere
-  in the issue title or body.
-
-The adapter probes each spawn's task title + body and, if either path
-trips, routes that one work tree to the free OpenRouter model — every
-other issue runs on its configured paid model. This closes the gap from
-0.8.10's process-wide flag, which required a redeploy to flip on/off.
-
-**Sub-issue inheritance.** When the MCP `create_sub_issue` tool runs
-inside an adapter spawn that resolved to test mode, the adapter sets
-`PAPERCLIP_TEST_MODE=1` on the MCP subprocess env and the tool prepends
-`<!-- mode: test -->` plus an `inherited from parent: …` provenance
-line to the sub-issue body before posting. The woken sub-agent then
-probes its own issue and inherits test mode automatically — no
-cross-process channel beyond the issue text the operator can see in the
-Paperclip UI. Idempotent: parents that already wrote the marker into
-their description don't double-add.
-
-**Source-of-truth in the banner.** The `*** TEST MODE ACTIVE ***` line
-now ends with `source=<env|issue-marker|issue-intent> detail="<phrase
-or marker>"` so a single grep answers "where did this activation come
-from?" — operator big-hammer, CEO's smoketest issue, or inherited from
-a parent run.
-
-**Activation priority:** env var > issue-marker > issue-intent > prod.
-Env wins because it's the incident-response lever; per-issue activation
-is the day-to-day UX. Recommended CEO prompt: *"Run a smoketest of the
-system in low-cost validation mode. Validate pipeline integrity
-end-to-end (wake-on-assign, MCP tool calls, status reconciliation,
-sub-agent delegation). Don't worry about output quality — free models
-are inconsistent under tool-use load."* Either phrase trips the
-override, sub-agents inherit automatically. 24 new tests cover marker
-detection, intent matching with false-positive guards, env-vs-issue
-precedence, MCP env emission, sub-issue prepending, and idempotency.
-
-**0.8.10-mil.0 — test-mode model override:** process-wide flag that
-swaps every spawn to a free OpenRouter model without touching any
-agent / company / routine configuration. Set
-`PAPERCLIP_ADAPTER_TEST_MODE=1` on the adapter process (or ECS task
-definition) and ALL agents in that process route to a free model for
-the duration of the run. Original `model` / `provider` /
-`auxiliaryModels` from the agent's adapterConfig are ignored; the
-prompt template, MCP tool allowlist, role/department/skills, and
-routine schedule are unchanged. Defaults to the OpenRouter `openrouter/free`
-meta-router (which auto-selects from free models that support
-tool calling and structured output — required for the
-`builtin:mil-heartbeat-v3` MCP-tool prompt). Pin to a specific slug
-with `PAPERCLIP_ADAPTER_TEST_MODEL=google/gemma-4-31b-it:free` (or
-similar). Auxiliary slots are forced to the same free model so test
-mode is truly $0/run regardless of how Hermes' default-fallback
-chain behaves.
-
-A loud `[hermes] *** TEST MODE ACTIVE *** agent=<name> model=X->Y
-provider=X->Y auxiliary=*->Y source=env detail="…"` banner is emitted
-at the top of every spawn while active (the `source` field was added
-in 0.8.11; in 0.8.10 the banner ended with `(set by
-PAPERCLIP_ADAPTER_TEST_MODE=1)` instead), so a
-single grep on production logs confirms (a) test mode is on and
-(b) which agent's config was being used as the base. Off by default;
-set to `0`/unset to revert to per-agent paid models with no
-redeploy required (it's resolved at the start of each spawn). 13 new
-unit tests in `test-mode.test.ts` cover truthiness parsing, default +
-explicit overrides, whitespace trimming, banner formatting, and
-inactive-mode safety.
-
-Use cases: pre-flight smoke testing a new routine before letting it
-fire on the paid model, reproducing a stuck-issue bug without
-spending $5–$15 per attempt, validating that wake-on-assign + MCP +
-status reconciliation work end-to-end after an infra change.
-
 **0.8.9-mil.0 — per-agent auxiliary-models override:** ready-but-
 inert escape hatch for the cost regression in Hermes >= v2026.4.23
 ("v0.11.0"). Hermes makes background LLM calls outside the main
@@ -317,6 +240,83 @@ The `[hermes] per-run config.yaml env: …` startup log now includes
 `stdout_excerpt` instead of weeks later in cost reports. Nine new
 tests in `hermes-home.test.ts` cover no-override / override /
 slot-collision / partial-merge / defensive-shape paths.
+
+**0.8.10-mil.0 — test-mode model override:** process-wide flag that
+swaps every spawn to a free OpenRouter model without touching any
+agent / company / routine configuration. Set
+`PAPERCLIP_ADAPTER_TEST_MODE=1` on the adapter process (or ECS task
+definition) and ALL agents in that process route to a free model for
+the duration of the run. Original `model` / `provider` /
+`auxiliaryModels` from the agent's adapterConfig are ignored; the
+prompt template, MCP tool allowlist, role/department/skills, and
+routine schedule are unchanged. Defaults to the OpenRouter `openrouter/free`
+meta-router (which auto-selects from free models that support
+tool calling and structured output — required for the
+`builtin:mil-heartbeat-v3` MCP-tool prompt). Pin to a specific slug
+with `PAPERCLIP_ADAPTER_TEST_MODEL=google/gemma-4-31b-it:free` (or
+similar). Auxiliary slots are forced to the same free model so test
+mode is truly $0/run regardless of how Hermes' default-fallback
+chain behaves.
+
+A loud `[hermes] *** TEST MODE ACTIVE *** agent=<name> model=X->Y
+provider=X->Y auxiliary=*->Y source=env detail="…"` banner is emitted
+at the top of every spawn while active (the `source` field was added
+in 0.8.11; in 0.8.10 the banner ended with `(set by
+PAPERCLIP_ADAPTER_TEST_MODE=1)` instead), so a
+single grep on production logs confirms (a) test mode is on and
+(b) which agent's config was being used as the base. Off by default;
+set to `0`/unset to revert to per-agent paid models with no
+redeploy required (it's resolved at the start of each spawn). 13 new
+unit tests in `test-mode.test.ts` cover truthiness parsing, default +
+explicit overrides, whitespace trimming, banner formatting, and
+inactive-mode safety.
+
+Use cases: pre-flight smoke testing a new routine before letting it
+fire on the paid model, reproducing a stuck-issue bug without
+spending $5–$15 per attempt, validating that wake-on-assign + MCP +
+status reconciliation work end-to-end after an infra change.
+
+**0.8.11-mil.0 — per-issue test mode + sub-issue inheritance:** day-to-day
+UX layer on top of 0.8.10. Operators (or the CEO agent) can flip a
+*single* issue into test mode by either:
+
+- including the explicit machine-readable marker `<!-- mode: test -->`
+  in the issue body (canonical, zero false-positive risk), or
+- using a natural-language intent phrase (`smoketest`, `smoke test`,
+  `smoke-test`, `test mode`, `low-cost validation`, `test flow`) anywhere
+  in the issue title or body.
+
+The adapter probes each spawn's task title + body and, if either path
+trips, routes that one work tree to the free OpenRouter model — every
+other issue runs on its configured paid model. This closes the gap from
+0.8.10's process-wide flag, which required a redeploy to flip on/off.
+
+**Sub-issue inheritance.** When the MCP `create_sub_issue` tool runs
+inside an adapter spawn that resolved to test mode, the adapter sets
+`PAPERCLIP_TEST_MODE=1` on the MCP subprocess env and the tool prepends
+`<!-- mode: test -->` plus an `inherited from parent: …` provenance
+line to the sub-issue body before posting. The woken sub-agent then
+probes its own issue and inherits test mode automatically — no
+cross-process channel beyond the issue text the operator can see in the
+Paperclip UI. Idempotent: parents that already wrote the marker into
+their description don't double-add.
+
+**Source-of-truth in the banner.** The `*** TEST MODE ACTIVE ***` line
+now ends with `source=<env|issue-marker|issue-intent> detail="<phrase
+or marker>"` so a single grep answers "where did this activation come
+from?" — operator big-hammer, CEO's smoketest issue, or inherited from
+a parent run.
+
+**Activation priority:** env var > issue-marker > issue-intent > prod.
+Env wins because it's the incident-response lever; per-issue activation
+is the day-to-day UX. Recommended CEO prompt: *"Run a smoketest of the
+system in low-cost validation mode. Validate pipeline integrity
+end-to-end (wake-on-assign, MCP tool calls, status reconciliation,
+sub-agent delegation). Don't worry about output quality — free models
+are inconsistent under tool-use load."* Either phrase trips the
+override, sub-agents inherit automatically. 24 new tests cover marker
+detection, intent matching with false-positive guards, env-vs-issue
+precedence, MCP env emission, sub-issue prepending, and idempotency.
 
 Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
