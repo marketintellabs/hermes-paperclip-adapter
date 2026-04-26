@@ -407,6 +407,55 @@ The LLM-facing tool input field is still named `parentIssueId`
 docs); only the wire payload to Paperclip was renamed. Anyone using
 the upstream adapter directly against Paperclip should bump.
 
+**0.8.14-mil.0 — `result_json` clarity (model/provider populated,
+marker_present renamed):** two follow-ups from the Stage 3 retest. (1)
+`resultJson.modelUsed`, `provider`, and `providerSource` are now
+populated on every successful run, sourced from the adapter's own
+resolver (the same value it logs in the `[hermes] Starting Hermes
+Agent (model=…, provider=…)` banner). Previously these fields were
+only ever set when `parseHermesOutput` could grep them out of stdout,
+which only happens on timed-out runs — meaning every clean successful
+run logged `modelUsed: null`, making post-run "which model paid the
+bill" queries impossible without ECS exec'ing into the container and
+reading the NDJSON log file. (2) `result_marker_present` is the new
+canonical name for the `RESULT:` marker boolean (the adapter-owned
+status v2+ contract); `marker_present` is preserved as a deprecated
+alias for one release because the old name was misleading — operators
+reasonably read it as "test-mode marker present"
+(`<!-- mode: test -->`), which is a different concept entirely. Both
+fields hold the same value through 0.8.x; the alias will be removed in
+0.9.0. `cost_usd` is still `null` for successful runs against Hermes
+Agent v0.9.0 — that's an upstream Hermes Agent quiet-mode limitation
+(no cost line in stdout), tracked as a separate follow-up to call
+OpenRouter's generation endpoint after the run.
+
+**0.8.15-mil.0 — observability bundle (skill preload validation +
+soft-timeout warning):** two pure-add observability hooks that surface
+silent failure modes BEFORE they become incidents. (1) `execute()` now
+stat()s every path declared in `adapterConfig.hermes_skill` /
+`hermes_skills` against the resolved skills root (`HERMES_SKILLS_DIR`,
+falling back to `/data/hermes/skills`) before pre-flight; each
+declared-but-missing skill produces a `[hermes] WARN: skill "<ref>"
+declared in adapterConfig … but not found at <abspath> — Hermes will
+run WITHOUT this skill` line on stderr, and a single rollup line on
+stdout. Previously a renamed-or-unmounted skill file (`persona-sarah-chen.md`
+moved on EFS, etc.) ran without the persona and the operator only
+noticed because the output sounded wrong. (2) Soft-timeout warning at
+80% of `timeoutSec` — `[hermes] WARN: soft-timeout reached at <N>s
+(80% of <T>s hard limit). Run still in progress; consider raising
+adapterConfig.timeoutSec if this becomes routine.` lands in the run
+transcript so operators see "agents that consistently brush their
+deadline" before one finally trips it. Threshold tunable via
+`adapterConfig.softTimeoutThreshold` (any 0 < t < 1; default 0.8);
+disable via `adapterConfig.softTimeoutWarn=false`. Both items are
+non-fatal observability — no wire-format change, no prompt-template
+change, no run-behaviour change. Companion to the Hermes Agent
+v2026.4.23 (v0.11.0) bump: with `agent.api_max_retries` (Hermes
+#14730) and activity-heartbeats (#10501) handling transient failures
+upstream, persistent timeouts are now a clearer "this agent is genuinely
+stuck" signal — exactly what soft-timeout warnings are designed to
+surface early.
+
 **0.8.16-mil.0 — `create_sub_issues` (plural) for parallel
 delegation:** new MCP tool that takes one shared `parentIssueId` plus
 an array of `subIssues` (capped at 10 per call) and POSTs them via
@@ -443,54 +492,25 @@ including the entire `tools.test.js` suite covering singular
 `create_sub_issue`). Test count jumped 224 → 278 with no behaviour
 change.
 
-**0.8.15-mil.0 — observability bundle (skill preload validation +
-soft-timeout warning):** two pure-add observability hooks that surface
-silent failure modes BEFORE they become incidents. (1) `execute()` now
-stat()s every path declared in `adapterConfig.hermes_skill` /
-`hermes_skills` against the resolved skills root (`HERMES_SKILLS_DIR`,
-falling back to `/data/hermes/skills`) before pre-flight; each
-declared-but-missing skill produces a `[hermes] WARN: skill "<ref>"
-declared in adapterConfig … but not found at <abspath> — Hermes will
-run WITHOUT this skill` line on stderr, and a single rollup line on
-stdout. Previously a renamed-or-unmounted skill file (`persona-sarah-chen.md`
-moved on EFS, etc.) ran without the persona and the operator only
-noticed because the output sounded wrong. (2) Soft-timeout warning at
-80% of `timeoutSec` — `[hermes] WARN: soft-timeout reached at <N>s
-(80% of <T>s hard limit). Run still in progress; consider raising
-adapterConfig.timeoutSec if this becomes routine.` lands in the run
-transcript so operators see "agents that consistently brush their
-deadline" before one finally trips it. Threshold tunable via
-`adapterConfig.softTimeoutThreshold` (any 0 < t < 1; default 0.8);
-disable via `adapterConfig.softTimeoutWarn=false`. Both items are
-non-fatal observability — no wire-format change, no prompt-template
-change, no run-behaviour change. Companion to the Hermes Agent
-v2026.4.23 (v0.11.0) bump: with `agent.api_max_retries` (Hermes
-#14730) and activity-heartbeats (#10501) handling transient failures
-upstream, persistent timeouts are now a clearer "this agent is genuinely
-stuck" signal — exactly what soft-timeout warnings are designed to
-surface early.
-
-**0.8.14-mil.0 — `result_json` clarity (model/provider populated,
-marker_present renamed):** two follow-ups from the Stage 3 retest. (1)
-`resultJson.modelUsed`, `provider`, and `providerSource` are now
-populated on every successful run, sourced from the adapter's own
-resolver (the same value it logs in the `[hermes] Starting Hermes
-Agent (model=…, provider=…)` banner). Previously these fields were
-only ever set when `parseHermesOutput` could grep them out of stdout,
-which only happens on timed-out runs — meaning every clean successful
-run logged `modelUsed: null`, making post-run "which model paid the
-bill" queries impossible without ECS exec'ing into the container and
-reading the NDJSON log file. (2) `result_marker_present` is the new
-canonical name for the `RESULT:` marker boolean (the adapter-owned
-status v2+ contract); `marker_present` is preserved as a deprecated
-alias for one release because the old name was misleading — operators
-reasonably read it as "test-mode marker present"
-(`<!-- mode: test -->`), which is a different concept entirely. Both
-fields hold the same value through 0.8.x; the alias will be removed in
-0.9.0. `cost_usd` is still `null` for successful runs against Hermes
-Agent v0.9.0 — that's an upstream Hermes Agent quiet-mode limitation
-(no cost line in stdout), tracked as a separate follow-up to call
-OpenRouter's generation endpoint after the run.
+**0.8.16-mil.1 — README ordering fix + CI guard:** docs-only patch.
+The in-flight section had drifted out of ascending order again
+(0.8.16 / 0.8.15 / 0.8.14 appended at the wrong end of the section,
+breaking the chronological flow established by entries 0.8.0
+through 0.8.13 above them). Re-sorted so every entry once again
+appears in ascending version order, matching how npmjs.com renders
+the package page top-to-bottom. **Same shape of regression we
+shipped patches for in 0.8.8-mil.2 and 0.8.11-mil.1**, so this
+release also adds an automated CI guard
+(`src/shared/readme-order.test.ts`) that parses every `**X.Y.Z-mil.N`
+header and asserts the tuples are monotonically non-decreasing —
+plus a cross-check that `package.json.version` is at-or-above the
+latest README header, to catch the case where someone bumps the
+package version but forgets to add the corresponding README entry.
+Failure messages name the offending lines AND print the expected
+ordering, so future regressions surface in CI with a single-glance
+fix. No code changes from 0.8.16-mil.0; existing deployments do
+not need to redeploy. Republished to npm so the package page picks
+up the corrected README (npm only re-renders on a fresh publish).
 
 ## MIL-specific features
 
