@@ -7,7 +7,7 @@ It implements the `ServerAdapterModule` interface from `@paperclipai/adapter-uti
 
 MarketIntelLabs maintains this fork. See [`UPSTREAM.md`](./UPSTREAM.md) for
 the divergence list and sync policy, and [`README.md`](./README.md) §"Currently in flight"
-for the active workstream (0.7.x — MCP tool server + per-run `HERMES_HOME`).
+for the active workstream. Current pin: **`0.8.17-mil.0`** (auto-repair detector that surfaces Hermes' silent fuzzy tool-name rewrites). Recent arc: 0.7.x MCP tool server → 0.8.x operational hardening (session-id guards, telemetry, test-mode routing, parallel `create_sub_issues`, skill preload validation, soft-timeout warning, auto-repair detector).
 
 ## Structure
 
@@ -59,11 +59,15 @@ templates/
                           # RULES + FIRST ACTION RULE)
 ```
 
-Test files sit next to their modules (`*.test.ts`). Total coverage:
-46 tests across 11 suites at 0.7.0-mil.0 — scope violation, retry
-classifier, MAX_TOOL_CALLS, YAML merge, symlink scheme, runId sanitization,
-parseHermesOutput error detection, RESULT marker parse/strip, run-context
-resolution.
+Test files sit next to their modules (`*.test.ts`). The suite has grown
+from the 46-test 0.7.0-mil.0 baseline through skill preload validation,
+soft-timeout, auto-repair detector (12 new tests), README ordering guard,
+and other 0.8.x additions. Run `npm test` for the canonical count;
+recent areas covered: scope violation, retry classifier, MAX_TOOL_CALLS,
+YAML merge, symlink scheme, runId sanitization, parseHermesOutput error
+detection, RESULT marker parse/strip, run-context resolution, skill
+preload missing-paths, soft-timeout 80% threshold, auto-repair pattern
+matching + allowlist classification, README ordering invariant.
 
 ## Key Interfaces
 
