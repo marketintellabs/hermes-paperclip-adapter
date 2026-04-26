@@ -407,6 +407,33 @@ The LLM-facing tool input field is still named `parentIssueId`
 docs); only the wire payload to Paperclip was renamed. Anyone using
 the upstream adapter directly against Paperclip should bump.
 
+**0.8.15-mil.0 — observability bundle (skill preload validation +
+soft-timeout warning):** two pure-add observability hooks that surface
+silent failure modes BEFORE they become incidents. (1) `execute()` now
+stat()s every path declared in `adapterConfig.hermes_skill` /
+`hermes_skills` against the resolved skills root (`HERMES_SKILLS_DIR`,
+falling back to `/data/hermes/skills`) before pre-flight; each
+declared-but-missing skill produces a `[hermes] WARN: skill "<ref>"
+declared in adapterConfig … but not found at <abspath> — Hermes will
+run WITHOUT this skill` line on stderr, and a single rollup line on
+stdout. Previously a renamed-or-unmounted skill file (`persona-sarah-chen.md`
+moved on EFS, etc.) ran without the persona and the operator only
+noticed because the output sounded wrong. (2) Soft-timeout warning at
+80% of `timeoutSec` — `[hermes] WARN: soft-timeout reached at <N>s
+(80% of <T>s hard limit). Run still in progress; consider raising
+adapterConfig.timeoutSec if this becomes routine.` lands in the run
+transcript so operators see "agents that consistently brush their
+deadline" before one finally trips it. Threshold tunable via
+`adapterConfig.softTimeoutThreshold` (any 0 < t < 1; default 0.8);
+disable via `adapterConfig.softTimeoutWarn=false`. Both items are
+non-fatal observability — no wire-format change, no prompt-template
+change, no run-behaviour change. Companion to the Hermes Agent
+v2026.4.23 (v0.11.0) bump: with `agent.api_max_retries` (Hermes
+#14730) and activity-heartbeats (#10501) handling transient failures
+upstream, persistent timeouts are now a clearer "this agent is genuinely
+stuck" signal — exactly what soft-timeout warnings are designed to
+surface early.
+
 **0.8.14-mil.0 — `result_json` clarity (model/provider populated,
 marker_present renamed):** two follow-ups from the Stage 3 retest. (1)
 `resultJson.modelUsed`, `provider`, and `providerSource` are now
@@ -622,6 +649,8 @@ Available toolsets: `terminal`, `file`, `web`, `browser`, `code_execution`, `vis
 | `paperclipMcpTools` | string[] | *(all)* | Per-agent MCP tool allowlist. `[]` = deny-all; absent = register every tool. See "Currently in flight" entry for 0.8.8 above. |
 | `auxiliaryModels` | object | *(none)* | Per-agent override for Hermes' auxiliary-task models (`compression`, `vision`, `session_search`, `title_generation`, …). Passed through to `config.yaml` `auxiliary:` block. Slot-level merge with `~/.hermes/config.yaml`. No-op against Hermes < v2026.4.23. See 0.8.9 entry above. |
 | `preflightSkip` | boolean | `true` | Skip the Hermes spawn when no work is assigned. Set `false` per-agent to opt out. See 0.8.7 entry above. |
+| `softTimeoutWarn` | boolean | `true` | Emit a `[hermes] WARN: soft-timeout reached at <N>s …` line when the run crosses `softTimeoutThreshold` × `timeoutSec` (one-shot, observational only — never modifies run behaviour). Set `false` per-agent to opt out. See 0.8.15 entry above. |
+| `softTimeoutThreshold` | number | `0.8` | Fraction of `timeoutSec` at which the soft-timeout warning fires. Must be strictly between `0` and `1`; out-of-range values fall back to `0.8`. Warning is also skipped if the resulting delay is < 5 s (too noisy to be useful at very short timeouts). |
 
 ### Test mode (per-issue UX + process-wide big-hammer)
 

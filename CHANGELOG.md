@@ -6,6 +6,21 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.15-mil.0] — 2026-04-26
+
+### Added
+- **Skill preload validation at run start.** `execute()` now stat()s every path declared in `adapterConfig.hermes_skill` and `adapterConfig.hermes_skills` against the resolved skills root (`HERMES_SKILLS_DIR`, falling back to `/data/hermes/skills`). Each declared-but-missing skill produces a `[hermes] WARN: skill "<ref>" declared in adapterConfig … but not found at <abspath> — Hermes will run WITHOUT this skill` line on stderr, and a single rollup `[hermes] skills validated: N/M present, K MISSING` line on stdout. Hermes itself silently ignores missing skill files at run time, so an agent referencing `skills/persona-sarah-chen.md` after the file was renamed or unmounted from EFS used to run without the persona and the operator only noticed because the output sounded wrong. The validator is purely diagnostic — never fatal — and is wired in BEFORE pre-flight so the warning lands even on no-op wakes that exit without spawning Hermes.
+- **Soft-timeout warning at 80% of `timeoutSec`.** `execute()` schedules a one-shot `setTimeout` after the child process spawns. When fired, it emits `[hermes] WARN: soft-timeout reached at <N>s (80% of <T>s hard limit). Run still in progress; consider raising adapterConfig.timeoutSec if this becomes routine.` to stderr. Skipped entirely if `timeoutSec ≤ 0`, if the warning would fire below a 5-second floor, or if the operator opts out via `adapterConfig.softTimeoutWarn=false`. Threshold tunable via `adapterConfig.softTimeoutThreshold` (any value strictly between 0 and 1; defaults to 0.8). The timer is unref()d so it doesn't keep the event loop alive past the run, and it's cleared in the same `finally` block that runs MCP telemetry collection — no leak path even if the run throws synchronously. Operationally this surfaces "agents that consistently brush their hard timeout" before one of them actually trips it, giving operators a chance to right-size `timeoutSec` per agent without needing a failure to investigate.
+- 14 new unit tests across `validate-skills.test.ts` (config shape edge cases, env-var resolution, absolute-path passthrough, fault tolerance) and `soft-timeout.test.ts` (default threshold, opt-out, custom threshold clamping, message formatting).
+
+### Notes
+- **No wire-format or prompt-template change.** Both additions are observability-only: they emit log lines into the existing `ctx.onLog("stdout"|"stderr", …)` stream that already feeds the Paperclip run transcript and CloudWatch. Safe rolling deploy — no config migration required, every flag is opt-in to the existing default behavior.
+- **`soft-timeout` interaction with the hard timeout is none.** The hard timeout in `runChildProcess` (`timeoutSec` + `graceSec`) still owns SIGTERM / SIGKILL of a hung child; the soft warning is purely informational and does not modify run behaviour.
+- **Skill validation is best-effort I/O.** A flaky EFS mount won't break a run — every `fs.stat` failure is caught individually and counted toward `missing` so the WARN line still appears, and a higher-level catch around the whole validator emits a single `[hermes] skill validation failed (non-fatal): …` line if something more catastrophic goes wrong. Disable by clearing `hermes_skill` / `hermes_skills` from `adapterConfig` (no-op when both are empty).
+- **Companion to the Hermes Agent v2026.4.23 (v0.11.0) bump.** Both items in this release surface state that becomes more important after the Hermes upgrade: the new `agent.api_max_retries` config (Hermes #14730) and activity-heartbeats (Hermes #10501) handle transient LLM failures and gateway-restart resume more gracefully, so persistent timeouts are now more meaningful as a "this agent is genuinely stuck" signal — exactly what soft-timeout warnings are designed to surface early.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.15-mil.0)
+
 ## [0.8.14-mil.0] — 2026-04-25
 
 ### Added
