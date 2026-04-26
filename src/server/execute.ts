@@ -74,6 +74,9 @@ import {
   type TestModeConfig,
 } from "./test-mode.js";
 
+import { validateAgentSkills, resolveSkillPath } from "./validate-skills.js";
+import { planSoftTimeout, formatSoftTimeoutWarning } from "./soft-timeout.js";
+
 // ---------------------------------------------------------------------------
 // Config helpers
 // ---------------------------------------------------------------------------
@@ -1445,6 +1448,45 @@ export async function execute(
     }
   }
 
+  // ── Skill preload validation (0.8.15+) ─────────────────────────────────
+  // Surface declared-but-missing Hermes skills BEFORE spawning. Hermes
+  // silently ignores a missing skill file at run time — the agent just
+  // runs without that persona/skill loaded, and the operator only notices
+  // later because the output sounds wrong. This check produces a clear
+  // [hermes] WARN: line per missing skill so the gap is visible in the
+  // run transcript and in CloudWatch.
+  //
+  // NEVER FATAL — a filesystem hiccup must not break a real run. The
+  // validator catches its own errors and reports them as a single warning.
+  try {
+    const skillValidation = await validateAgentSkills(config);
+    if (skillValidation.declared > 0) {
+      if (skillValidation.missing.length === 0) {
+        await ctx.onLog(
+          "stdout",
+          `[hermes] skills validated: all ${skillValidation.declared} declared skill(s) present at ${skillValidation.skillsRoot}\n`,
+        );
+      } else {
+        for (const ref of skillValidation.missing) {
+          const resolved = resolveSkillPath(ref, skillValidation.skillsRoot);
+          await ctx.onLog(
+            "stderr",
+            `[hermes] WARN: skill "${ref}" declared in adapterConfig (hermes_skill / hermes_skills) but not found at ${resolved} — Hermes will run WITHOUT this skill\n`,
+          );
+        }
+        await ctx.onLog(
+          "stdout",
+          `[hermes] skills validated: ${skillValidation.found.length}/${skillValidation.declared} present, ${skillValidation.missing.length} MISSING (see warnings above)\n`,
+        );
+      }
+    }
+  } catch (err) {
+    await ctx.onLog(
+      "stdout",
+      `[hermes] skill validation failed (non-fatal): ${(err as Error).message}\n`,
+    );
+  }
+
   // ── Build Paperclip API client (used for pre-run claim + post-run) ─────
   const paperclipClient = buildPaperclipClient(ctx, config, env);
 
@@ -1664,6 +1706,19 @@ export async function execute(
   // which cleanup() blows away. Null when no MCP tool server was
   // spawned for this run (legacy templates).
   let mcpTelemetry: McpTelemetry | null = null;
+
+  // ── Soft-timeout warning (0.8.15+) ─────────────────────────────────────
+  // Fires once at `softTimeoutThreshold` (default 80%) of the hard
+  // timeout, logging a single [hermes] WARN: line so operators can see
+  // which agents consistently brush their deadlines BEFORE one finally
+  // trips it. Opt out via adapterConfig.softTimeoutWarn=false.
+  const softPlan = planSoftTimeout({
+    timeoutSec,
+    threshold: cfgNumber(config.softTimeoutThreshold),
+    enabled: cfgBoolean(config.softTimeoutWarn) !== false,
+  });
+  let softTimeoutTimer: NodeJS.Timeout | null = null;
+
   try {
     result = await runChildProcess(ctx.runId, hermesCmd, args, {
       cwd,
@@ -1671,8 +1726,28 @@ export async function execute(
       timeoutSec,
       graceSec,
       onLog: wrappedOnLog,
+      onSpawn: async () => {
+        if (softPlan.enabled) {
+          softTimeoutTimer = setTimeout(() => {
+            // Best-effort log — fire-and-forget. Errors here must never
+            // propagate (would crash the host process via unhandled
+            // rejection).
+            void wrappedOnLog(
+              "stderr",
+              formatSoftTimeoutWarning(softPlan, timeoutSec),
+            ).catch(() => {});
+          }, softPlan.delayMs);
+          // Don't keep the event loop alive solely for the warning — the
+          // child process owns the run lifecycle.
+          softTimeoutTimer.unref?.();
+        }
+      },
     });
   } finally {
+    if (softTimeoutTimer) {
+      clearTimeout(softTimeoutTimer);
+      softTimeoutTimer = null;
+    }
     if (perRunHome) {
       try {
         mcpTelemetry = await collectMcpTelemetry(
