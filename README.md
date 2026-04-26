@@ -555,6 +555,100 @@ the right shim. 12 new unit tests covering happy path, multi-line
 chunks, CRLF, both bare and namespaced allowlist forms, opt-out,
 all three classification states, and a false-positive guard.
 
+**0.8.18-mil.0 — operational hardening bundle (retry-on-transient,
+transcript cap, runtime health probe, env-var unwrap):** four
+backlog items shipped together — none individually large, but
+together they close the long-running 0.8.x ergonomic loop. (1)
+**Retry with backoff on transient LLM failures** — `runChildProcess`
+is now wrapped in a retry loop driven by a conservative classifier
+(`src/server/retry-policy.ts`). When a finished run looks like an
+upstream blip — OpenRouter status 429 or 5xx, Anthropic
+`overloaded_error`, `rate_limit_error`, generic HTTP 502/503/504
+status lines, `provider overloaded`, gateway timeouts, ECONNRESET,
+ETIMEDOUT — the adapter sleeps `retryBackoffSec` (default 30s),
+emits a `[hermes] retrying after transient failure …` notice, and
+respawns Hermes with the same args. Hard timeouts (`timedOut: true`)
+and SIGKILLs are explicitly classified as **permanent**: a run that
+already burned its full timeout budget either ran a tool loop or the
+model genuinely can't finish in time, and retrying just doubles the
+wall clock. Default budget is **one** retry; tunable via
+`retryMaxAttempts` (clamped to 3) and `retryBackoffSec` (clamped to
+600). Disable entirely with `retryOnTransient: false`. Each retry is
+recorded in `result_json.retries[] = [{ attempt, reason, pattern }]`
+plus a `retryAttempts` counter that's always present (zero on
+success-on-first-try, so dashboards can `WHERE retry_attempts > 0`
+cleanly without `IS NULL` plumbing). (2) **`maxTranscriptEntries`
+config** — opt-in cap on the number of `ctx.onLog` chunks forwarded
+per run. Above the cap, further LLM-output chunks are suppressed and
+a single `[hermes] transcript truncated: cap=N reached …` notice is
+emitted. Adapter-emitted `[hermes] *` lines (banner, exit code, MCP
+telemetry summary, soft-timeout warning, auto-repair alerts, retry
+notices) ALWAYS bypass the cap so structural diagnostics are never
+lost — the cap targets noisy LLM streaming, not adapter output.
+`result_json.transcriptObserved`, `transcriptSuppressed`, and
+`transcriptTruncated` make the cap's effect inspectable. Default 0
+(unlimited) preserves pre-0.8.18 behaviour; recommended setting for
+agents that occasionally emit hundreds of streamed chunks per run is
+~200. (3) **Runtime health-check CLI: `paperclip-hermes-health`** —
+new bin entry runs four probes and prints structured JSON:
+hermes-binary on PATH (`hermes --version`), `$HERMES_HOME` exists
++ writable (real `mkdtemp` test, not just `access(W_OK)` — needed
+because some EFS configurations lie on the latter), `state.db`
+opens cleanly via `node:sqlite` and reports session count, and
+OpenRouter reachability via an unauthenticated `GET /api/v1/models`
+with a 5s `AbortSignal.timeout`. Exit codes: `0` pass, `1` fail
+(foundational check failed — binary missing, home unwritable, etc.),
+`2` warn (no errors, but a non-foundational concern like OpenRouter
+returning 503). Flags: `--no-network`, `--pretty`, `--hermes-home`,
+`--hermes-cmd`. Designed for two callers: (a) a human shell-execing
+into the container during incident triage, (b) the Staff Engineer
+agent calling the binary via shell and parsing the JSON instead of
+running ad-hoc diagnostic commands. Check codes are stable across
+patch releases. (4) **Env-var unwrap fix (cherry-pick of upstream
+NousResearch PR #29).** Pre-0.8.18 `Object.assign(env, userEnv)`
+copied Paperclip's `{ type, value }` secret-ref wrappers verbatim,
+so spawned Hermes saw `ANTHROPIC_API_KEY=[object Object]` for any
+key set via `adapterConfig.env`. The bug was latent in our deploy
+because every key that matters is set via the ECS task-definition
+env (container-level), not through Paperclip's per-agent secret
+refs — but the next operator who reaches for the "Secrets" tab to
+inject a one-off API key would have hit it. Replaced with the
+canonical iteration that handles plain strings, `{ value }`
+wrappers (with or without `type`), and silently-but-loudly drops
+anything weird (a single `[hermes] WARN: dropped N
+adapterConfig.env entries with non-string value` line per run, not
+one per key). Credit @lucasproko for the original upstream report;
+PR #29 has been open since 2026-03 and never merged. **Audit of
+upstream PRs #28 and #31 (also referenced in the 0.8.x followup
+plan):** explicitly chose NOT to cherry-pick. PR #28 ("Improve
+Hermes thinking/tool states") defaults Hermes to non-quiet mode,
+which conflicts with our 0.8.x `-Q` strategy and our
+`parseHermesOutput` contract that depends on the quiet-mode session
+ID line shape; the rendering improvements would require redoing all
+of `parse-hermes-output.ts`. PR #31 ("comprehensive adapter parity")
+is a 1,400-line rewrite that overlaps heavily with what 0.8.x ships
+differently — state.db cost extraction we already do via the
+heartbeat-v3 result_json plumbing, smart stderr filtering we already
+do via the auto-repair detector + benign-stderr reclassifier; the
+remaining novel pieces (profile-aware skill injection, billing-type
+subscription detection) aren't load-bearing for our deployment.
+Both PRs documented in the audit but skipped — divergence cost is
+real and not worth the bug surface for a marginal gain on features
+we already provide. **30 new unit tests** across
+`retry-policy.test.ts` (10 tests: classifier across every transient
+marker shape, hard-timeout/SIGKILL exclusion, conservative
+no-false-positive guard for the word "rate", config clamping,
+notice formatting), `transcript-cap.test.ts` (6 tests: passthrough
+mode, cap enforcement, adapter-diagnostic bypass, leading-whitespace
+recognition, observed-count accuracy, single-notice invariant),
+`env-unwrap.test.ts` (8 tests: null/undefined/non-object input,
+plain-string passthrough, `{ value }` unwrap, mixed bag, bad
+wrappers tracked in `droppedKeys`, `[object Object]` regression
+guard), and `health-check.test.ts` (6 tests: all-pass when each
+probe succeeds, hermes-binary fail, $HERMES_HOME-missing fail,
+network warns instead of fails, non-2xx warns, `--no-network`
+honoured). Total test count: 328 → 358.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
