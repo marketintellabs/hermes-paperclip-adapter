@@ -80,6 +80,13 @@ import {
   createAutoRepairDetector,
   type AutoRepairDetector,
 } from "./auto-repair-detector.js";
+import {
+  classifyRetryability,
+  resolveRetryPolicy,
+  formatRetryNotice,
+} from "./retry-policy.js";
+import { createTranscriptCap } from "./transcript-cap.js";
+import { unwrapUserEnv } from "./env-unwrap.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -1401,9 +1408,20 @@ export async function execute(
   const taskId = run.taskId;
   if (taskId) env.PAPERCLIP_TASK_ID = taskId;
 
-  const userEnv = config.env as Record<string, string> | undefined;
-  if (userEnv && typeof userEnv === "object") {
-    Object.assign(env, userEnv);
+  // 0.8.18+: unwrap Paperclip secret-ref shape `{ type, value }`.
+  // Prior to this release, `Object.assign(env, userEnv)` copied the
+  // wrapper object verbatim, so spawned Hermes saw values like
+  // `[object Object]`. Cherry-picked from upstream NousResearch PR
+  // #29 (never merged). See src/server/env-unwrap.ts for the contract.
+  const userEnvUnwrap = unwrapUserEnv(config.env);
+  Object.assign(env, userEnvUnwrap.env);
+  if (userEnvUnwrap.droppedKeys.length > 0) {
+    await ctx.onLog(
+      "stderr",
+      `[hermes] WARN: dropped ${userEnvUnwrap.droppedKeys.length} adapterConfig.env ` +
+        `entries with non-string value (keys: ${userEnvUnwrap.droppedKeys.join(", ")}). ` +
+        `Set them as plain strings or as Paperclip secret refs.\n`,
+    );
   }
 
   // ── Resolve working directory ──────────────────────────────────────────
@@ -1601,6 +1619,15 @@ export async function execute(
     enabled: autoRepairEnabled,
   });
 
+  // Transcript-entry cap (0.8.18+). Opt-in. When set, caps how many
+  // chunks the wrapper forwards to ctx.onLog for the entire run.
+  // Adapter-emitted `[hermes] *` lines bypass the cap so the
+  // structural framing (banner, exit code, MCP telemetry, soft-timeout
+  // warning, auto-repair alerts) is never lost. See
+  // src/server/transcript-cap.ts for the rationale.
+  const maxTranscriptEntries = cfgNumber(config.maxTranscriptEntries) ?? 0;
+  const transcriptCap = createTranscriptCap({ max: maxTranscriptEntries });
+
   // ── Execute ────────────────────────────────────────────────────────────
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
   // Paperclip renders all stderr as red/error in the UI.
@@ -1620,23 +1647,30 @@ export async function execute(
       await ctx.onLog("stderr", alert);
     }
 
+    let effectiveStream: "stdout" | "stderr" = stream;
+    let effectiveChunk: string = chunk;
+
     if (stream === "stderr") {
       const trimmed = chunk.trimEnd();
-      // Benign patterns that should NOT appear as errors:
-      // - Structured log lines: [timestamp] INFO/DEBUG/WARN: ...
-      // - MCP server registration messages
-      // - Python import/site noise
-      const isBenign = /^\[?\d{4}[-/]\d{2}[-/]\d{2}T/.test(trimmed) || // structured timestamps
-        /^[A-Z]+:\s+(INFO|DEBUG|WARN|WARNING)\b/.test(trimmed) || // log levels
+      const isBenign = /^\[?\d{4}[-/]\d{2}[-/]\d{2}T/.test(trimmed) ||
+        /^[A-Z]+:\s+(INFO|DEBUG|WARN|WARNING)\b/.test(trimmed) ||
         /Successfully registered all tools/.test(trimmed) ||
         /MCP [Ss]erver/.test(trimmed) ||
         /tool registered successfully/.test(trimmed) ||
         /Application initialized/.test(trimmed);
       if (isBenign) {
-        return ctx.onLog("stdout", chunk);
+        effectiveStream = "stdout";
       }
     }
-    return ctx.onLog(stream, chunk);
+
+    // Apply transcript-entry cap LAST so adapter-emitted lines
+    // (e.g. the auto-repair alerts above, soft-timeout warnings,
+    // [hermes] banner) bypass it via the helper's `[hermes]` allowlist.
+    const forwarded = transcriptCap.shouldForward(effectiveStream, effectiveChunk);
+    if (forwarded === null) {
+      return; // suppressed past the cap
+    }
+    return ctx.onLog(effectiveStream, forwarded);
   };
 
   // ── Per-run HERMES_HOME with Paperclip MCP tool server ────────────────
@@ -1759,30 +1793,94 @@ export async function execute(
   });
   let softTimeoutTimer: NodeJS.Timeout | null = null;
 
+  // Retry-on-transient policy (0.8.18+). When a finished run looks
+  // like an upstream LLM blip (OpenRouter 5xx, Anthropic
+  // overloaded_error, ECONNRESET, etc.) and the operator hasn't
+  // opted out, the adapter sleeps `backoffSec` and respawns Hermes
+  // with the same args. See src/server/retry-policy.ts for the
+  // classifier and the conservative-by-design marker list.
+  const retryPolicy = resolveRetryPolicy({
+    enabled: cfgBoolean(config.retryOnTransient),
+    maxAttempts: cfgNumber(config.retryMaxAttempts),
+    backoffSec: cfgNumber(config.retryBackoffSec),
+  });
+  const retryHistory: Array<{
+    attempt: number;
+    reason: string;
+    pattern?: string;
+  }> = [];
+  let retryAttempts = 0;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
   try {
-    result = await runChildProcess(ctx.runId, hermesCmd, args, {
-      cwd,
-      env,
-      timeoutSec,
-      graceSec,
-      onLog: wrappedOnLog,
-      onSpawn: async () => {
+    // Initial attempt + up-to-N retries on transient classification.
+    // The loop body is unchanged from the pre-0.8.18 single call;
+    // we just wrap it so the retry case respawns with identical
+    // args and the same softTimeoutTimer plumbing.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const armSoftTimeout = async () => {
         if (softPlan.enabled) {
+          if (softTimeoutTimer) clearTimeout(softTimeoutTimer);
           softTimeoutTimer = setTimeout(() => {
-            // Best-effort log — fire-and-forget. Errors here must never
-            // propagate (would crash the host process via unhandled
-            // rejection).
             void wrappedOnLog(
               "stderr",
               formatSoftTimeoutWarning(softPlan, timeoutSec),
             ).catch(() => {});
           }, softPlan.delayMs);
-          // Don't keep the event loop alive solely for the warning — the
-          // child process owns the run lifecycle.
           softTimeoutTimer.unref?.();
         }
-      },
-    });
+      };
+
+      result = await runChildProcess(ctx.runId, hermesCmd, args, {
+        cwd,
+        env,
+        timeoutSec,
+        graceSec,
+        onLog: wrappedOnLog,
+        onSpawn: armSoftTimeout,
+      });
+
+      if (softTimeoutTimer) {
+        clearTimeout(softTimeoutTimer);
+        softTimeoutTimer = null;
+      }
+
+      // Decide whether to retry. Skip the classifier entirely when
+      // retries are disabled or budget is exhausted.
+      if (!retryPolicy.enabled || retryAttempts >= retryPolicy.maxAttempts) {
+        break;
+      }
+      const verdict = classifyRetryability({
+        exitCode: result.exitCode,
+        signal: result.signal ?? null,
+        timedOut: result.timedOut,
+        stdout: result.stdout || "",
+        stderr: result.stderr || "",
+      });
+      if (!verdict.transient) break;
+
+      retryAttempts += 1;
+      retryHistory.push({
+        attempt: retryAttempts,
+        reason: verdict.reason,
+        pattern: (verdict as { pattern?: string }).pattern,
+      });
+      await ctx.onLog(
+        "stderr",
+        formatRetryNotice({
+          attempt: retryAttempts,
+          maxAttempts: retryPolicy.maxAttempts,
+          reason: verdict.reason,
+          backoffSec: retryPolicy.backoffSec,
+        }),
+      );
+      if (retryPolicy.backoffSec > 0) {
+        await sleep(retryPolicy.backoffSec * 1000);
+      }
+      // Loop continues — re-runs the same args with the same env.
+    }
   } finally {
     if (softTimeoutTimer) {
       clearTimeout(softTimeoutTimer);
@@ -1898,6 +1996,30 @@ export async function execute(
     usage: parsed.usage || null,
     cost_usd: parsed.costUsd ?? null,
   };
+
+  // ── Retry telemetry (0.8.18+) ────────────────────────────────────────
+  // Always present so dashboards can distinguish "no retry was needed"
+  // from "feature disabled" from "we retried N times". Empty history
+  // is the success-on-first-try shape.
+  if (retryHistory.length > 0) {
+    resultJson.retries = retryHistory;
+    resultJson.retryAttempts = retryHistory.length;
+    await ctx.onLog(
+      "stdout",
+      `[hermes] retry summary: ${retryHistory.length} retry(ies) triggered ` +
+        `(reasons: ${retryHistory.map((r) => r.reason).join(", ")})\n`,
+    );
+  } else {
+    resultJson.retryAttempts = 0;
+  }
+
+  // ── Transcript-cap telemetry (0.8.18+) ────────────────────────────────
+  if (transcriptCap.cap() > 0) {
+    resultJson.transcriptCap = transcriptCap.cap();
+    resultJson.transcriptObserved = transcriptCap.observed();
+    resultJson.transcriptSuppressed = transcriptCap.suppressed();
+    resultJson.transcriptTruncated = transcriptCap.truncated();
+  }
 
   // ── MCP telemetry → resultJson ────────────────────────────────────────
   // When the MCP tool server was used for this run, attach per-call

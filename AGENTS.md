@@ -7,7 +7,7 @@ It implements the `ServerAdapterModule` interface from `@paperclipai/adapter-uti
 
 MarketIntelLabs maintains this fork. See [`UPSTREAM.md`](./UPSTREAM.md) for
 the divergence list and sync policy, and [`README.md`](./README.md) §"Currently in flight"
-for the active workstream. Current pin: **`0.8.17-mil.0`** (auto-repair detector that surfaces Hermes' silent fuzzy tool-name rewrites). Recent arc: 0.7.x MCP tool server → 0.8.x operational hardening (session-id guards, telemetry, test-mode routing, parallel `create_sub_issues`, skill preload validation, soft-timeout warning, auto-repair detector).
+for the active workstream. Current pin: **`0.8.18-mil.0`** (operational hardening bundle: retry-on-transient, transcript cap, runtime health probe, env-var unwrap). Recent arc: 0.7.x MCP tool server → 0.8.x operational hardening (session-id guards, telemetry, test-mode routing, parallel `create_sub_issues`, skill preload validation, soft-timeout warning, auto-repair detector, retry-with-backoff, transcript cap, `paperclip-hermes-health` CLI).
 
 ## Structure
 
@@ -49,7 +49,10 @@ src/
 │   └── build-config.ts   # UI form → adapterConfig
 └── cli/
     ├── index.ts          # Re-exports
-    └── format-event.ts   # Terminal output formatting
+    ├── format-event.ts   # Terminal output formatting
+    └── health-cli.ts     # `paperclip-hermes-health` bin (0.8.18+) —
+                          # runtime readiness probe (binary, $HERMES_HOME,
+                          # state.db, OpenRouter); JSON output
 
 templates/
 ├── mil-heartbeat.md      # Legacy (LLM drives status via curl)
@@ -86,9 +89,9 @@ to the per-run `HERMES_HOME/config.yaml` so Hermes discovers it on boot.
 
 ```bash
 npm install
-npm run build     # tsc → dist/ (also chmods dist/mcp/cli.js for the bin)
+npm run build     # tsc → dist/ (also chmods dist/mcp/cli.js + dist/cli/health-cli.js)
 npm run typecheck # type checking only
-npm test          # runs the whole node:test suite (46 tests)
+npm test          # runs the whole node:test suite (run for the canonical count)
 ```
 
 ## Testing against a local Paperclip instance
