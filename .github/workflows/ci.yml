@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  # Force JS-based GitHub Actions to run under Node 24 ahead of
+  # GitHub's 2026-06-02 default flip and 2026-09-16 Node-20 removal.
+  # See release.yml for the full rationale.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   build:
     runs-on: ubuntu-latest

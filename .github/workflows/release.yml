@@ -10,6 +10,18 @@ permissions:
   contents: write
   id-token: write
 
+env:
+  # Force JS-based GitHub Actions (actions/checkout@v5,
+  # actions/setup-node@v5, etc.) to run under Node 24 ahead of GitHub's
+  # 2026-06-02 default flip and 2026-09-16 Node-20 removal. Same
+  # rationale as marketintellabs/.github/workflows/deploy.yml — the
+  # action versions themselves are current, but their JS runtime on
+  # the runner still defaults to Node 20. This env var is the official
+  # opt-in documented in the deprecation notice. It does NOT change the
+  # Node version used for `npm ci` / `npm run build` (that's set by
+  # actions/setup-node's `node-version: '24'`).
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   publish:
     name: Publish to npm
