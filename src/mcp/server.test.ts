@@ -66,7 +66,7 @@ function stubClient(): PaperclipClient {
 }
 
 describe("buildServer — tool registration", () => {
-  it("registers all 5 Paperclip tools by name", () => {
+  it("registers all 6 Paperclip tools by name", () => {
     const server = buildServer({ client: stubClient(), scopedIssueId: null });
     const names = Object.keys(
       (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools,
@@ -75,6 +75,7 @@ describe("buildServer — tool registration", () => {
       names.sort(),
       [
         "create_sub_issue",
+        "create_sub_issues",
         "get_issue",
         "list_my_issues",
         "post_issue_comment",
@@ -136,8 +137,8 @@ describe("parseAllowedToolsEnv", () => {
 
 describe("resolveToolsToRegister", () => {
   it("returns all tools when the allowlist is null/undefined", () => {
-    assert.equal(resolveToolsToRegister(null).length, 5);
-    assert.equal(resolveToolsToRegister(undefined).length, 5);
+    assert.equal(resolveToolsToRegister(null).length, 6);
+    assert.equal(resolveToolsToRegister(undefined).length, 6);
   });
 
   it("filters to the allowed names, preserving ALL_TOOLS order", () => {
