@@ -76,6 +76,10 @@ import {
 
 import { validateAgentSkills, resolveSkillPath } from "./validate-skills.js";
 import { planSoftTimeout, formatSoftTimeoutWarning } from "./soft-timeout.js";
+import {
+  createAutoRepairDetector,
+  type AutoRepairDetector,
+} from "./auto-repair-detector.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -1575,11 +1579,47 @@ export async function execute(
     await preRunClaim(paperclipClient, taskId);
   }
 
+  // ── Pre-resolve the per-agent MCP tool allowlist ──────────────────────
+  // We need this BEFORE `wrappedOnLog` is built so the auto-repair detector
+  // (below) can classify whether a Hermes-side tool-name rewrite was an
+  // unauthorized call (original tool not in allowlist) versus a benign
+  // typo near-miss. The same value is read again inside the
+  // `useMcpToolServer` block to drive `buildPerRunHermesHome.allowedTools`;
+  // the duplicate read is intentional and cheap.
+  const paperclipMcpToolsForDetector = cfgStringArray(config.paperclipMcpTools);
+
+  // Auto-repair detector — surfaces Hermes' silent fuzzy tool-name
+  // rewrites as loud `[hermes] ERROR:` lines on stderr. See
+  // src/server/auto-repair-detector.ts for the rationale and the
+  // production incident that motivated this (a non-delegator worker
+  // calling `create_sub_issues` was silently mapped to `get_issue`).
+  // Disabled via `adapterConfig.autoRepairAlerts = false`.
+  const autoRepairEnabled =
+    cfgBoolean(config.autoRepairAlerts) !== false; // default ON
+  const autoRepairDetector: AutoRepairDetector = createAutoRepairDetector({
+    allowedTools: paperclipMcpToolsForDetector ?? null,
+    enabled: autoRepairEnabled,
+  });
+
   // ── Execute ────────────────────────────────────────────────────────────
   // Hermes writes non-error noise to stderr (MCP init, INFO logs, etc).
   // Paperclip renders all stderr as red/error in the UI.
   // Wrap onLog to reclassify benign stderr lines as stdout.
   const wrappedOnLog = async (stream: "stdout" | "stderr", chunk: string) => {
+    // Auto-repair detection runs on BOTH streams (Hermes prints the
+    // `🔧 Auto-repaired tool name: …` line on stdout in our build, but
+    // upstream is allowed to flip it to stderr in a future version and
+    // we'd rather not silently lose the alarm). Each detection is
+    // emitted as an extra stderr line *in addition to* the original
+    // chunk so operators see both the verbatim Hermes line and the
+    // adapter-formatted alert side by side.
+    const alerts = autoRepairDetector.observe(chunk);
+    for (const alert of alerts) {
+      // Use the unwrapped ctx.onLog to bypass our own benign-stderr
+      // reclassification — these lines are deliberately stderr.
+      await ctx.onLog("stderr", alert);
+    }
+
     if (stream === "stderr") {
       const trimmed = chunk.trimEnd();
       // Benign patterns that should NOT appear as errors:
@@ -1918,6 +1958,38 @@ export async function execute(
     await ctx.onLog(
       "stderr",
       `[hermes] bypass detected: ${bypass.matches.length} match(es), primary=${bypass.primaryPattern}\n`,
+    );
+  }
+
+  // ── Auto-repair detections → resultJson ───────────────────────────────
+  // Surface any Hermes-side fuzzy tool-name rewrites we observed during
+  // the run. We've already emitted a loud `[hermes] ERROR:` line on
+  // stderr at the moment of detection (see `wrappedOnLog` above), but
+  // dashboards / postmortems also need a structured record. The
+  // `unauthorized: true` case is our highest-signal failure mode —
+  // it indicates the LLM tried to call a tool the agent's allowlist
+  // doesn't permit and Hermes silently substituted a different tool.
+  // Run is NOT failed automatically because some auto-repairs are
+  // benign typos; the operator decides policy from the structured
+  // record. See src/server/auto-repair-detector.ts for the rationale.
+  const autoRepairs = autoRepairDetector.detections();
+  if (autoRepairs.length > 0) {
+    resultJson.autoRepairs = autoRepairs.map((d) => ({
+      original: d.original,
+      repaired: d.repaired,
+      unauthorized: d.unauthorized,
+      ts: d.ts,
+    }));
+    const unauthorizedCount = autoRepairs.filter(
+      (d) => d.unauthorized === true,
+    ).length;
+    resultJson.autoRepairCount = autoRepairs.length;
+    resultJson.autoRepairUnauthorizedCount = unauthorizedCount;
+    await ctx.onLog(
+      "stderr",
+      `[hermes] auto-repair summary: ${autoRepairs.length} rewrite(s) ` +
+        `(${unauthorizedCount} unauthorized). See per-detection ERROR ` +
+        `lines above for the original→repaired tool names.\n`,
     );
   }
 

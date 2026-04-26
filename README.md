@@ -512,6 +512,49 @@ fix. No code changes from 0.8.16-mil.0; existing deployments do
 not need to redeploy. Republished to npm so the package page picks
 up the corrected README (npm only re-renders on a fresh publish).
 
+**0.8.17-mil.0 — auto-repair detector (Hermes silent fuzzy
+tool-name rewrites surfaced as loud alarms):** Hermes Agent's
+Python tool-call parser fuzzy-matches every `<TOOLCALL>` block
+against the agent's tool registry: if the LLM names a tool that
+doesn't exist exactly — typo, stale name, or a brand-new tool the
+worker isn't authorised for — Hermes silently rewrites the call
+to the closest-matching registered tool, prints a single
+`🔧 Auto-repaired tool name: 'X' -> 'Y'` line, and dispatches the
+rewritten call. We caught this in production on the 0.8.16-mil.0
+smoke test: a non-delegator worker calling
+`mcp_paperclip_create_sub_issues` (a tool only delegators have on
+their allowlist) was silently mapped to `mcp_paperclip_get_issue`
+— the call "succeeded", returned garbage from the worker's POV,
+and the actual decomposition the LLM intended never happened. No
+alarm, no failed run, no telemetry — pure silent breakage. The
+new detector watches the Hermes stream for the auto-repair
+signature line, extracts the original→repaired tool names, and
+(1) emits an `[hermes] ERROR: auto-repair: …` line on **stderr**
+at the moment of detection so Paperclip's UI renders it in the
+red error track, and (2) classifies the rewrite against the
+agent's `paperclipMcpTools` allowlist — the alert message
+explicitly says either "ORIGINAL tool was NOT in the per-agent
+allowlist" (the high-signal failure case the production incident
+hit) or "original tool IS in the per-agent allowlist (likely
+typo or near-miss)" so the operator gets one-line triage. Every
+detection is also written to `result_json.autoRepairs[]` (with
+`original`, `repaired`, `unauthorized`, `ts`) plus the rollup
+counters `result_json.autoRepairCount` and
+`result_json.autoRepairUnauthorizedCount`, so dashboards find
+these structurally without parsing log streams. Disable via
+`adapterConfig.autoRepairAlerts = false`. Does NOT abort the run
+— Hermes' auto-repair sometimes saves a benign typo and we don't
+want to nuke working agents over it; loud + observable is the
+contract, the operator decides policy from the structured record.
+Lives in the adapter (not Hermes) because the fuzzy match runs in
+Hermes' Python dispatcher *before* the call ever reaches the
+MCP server, so the adapter can only tee the rewrite signal — not
+prevent it. A future Hermes patch gating fuzzy match against the
+per-agent registry would obviate this; until then the adapter is
+the right shim. 12 new unit tests covering happy path, multi-line
+chunks, CRLF, both bare and namespaced allowlist forms, opt-out,
+all three classification states, and a false-positive guard.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
