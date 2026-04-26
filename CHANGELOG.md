@@ -6,6 +6,20 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.16-mil.1] — 2026-04-26
+
+### Changed
+- **README ordering fix.** The "Currently in flight (0.8.x)" section in the README listed `0.8.16` before `0.8.15` before `0.8.14` — out-of-order tail caused by appending `0.8.14`/`0.8.15`/`0.8.16` entries at the wrong end of the section. Re-sorted so every entry now appears in ascending version order — `0.8.0 → 0.8.1 → … → 0.8.14 → 0.8.15 → 0.8.16` — matching how the section was originally laid out and how npmjs.com renders the package page top-to-bottom. Same shape of regression we shipped patches for in `0.8.8-mil.2` and `0.8.11-mil.1`; this release adds a CI-enforceable guard so it stops happening.
+
+### Added
+- **`src/shared/readme-order.test.ts` — automated guard against the recurring out-of-order regression.** Two tests run on every CI build: (1) parses every `**X.Y.Z-mil.N — ` header in `README.md` and asserts the (X, Y, Z, N) tuples are monotonically non-decreasing, with a failure message that names the offending lines AND prints the expected order so the operator can fix it without re-reading the whole file; (2) cross-checks `package.json.version` against the latest README header to catch the case where someone bumps the package but forgets to add the README entry entirely (which would leave npm's package page silently stale at the previous version's notes). Both tests fail loud with actionable error messages explaining why the README and CHANGELOG use opposite orderings (CHANGELOG is reverse-chronological per Keep-a-Changelog convention; README is ascending because npmjs.com renders top-to-bottom).
+
+### Notes
+- Docs-only release. No code changes from `0.8.16-mil.0`. Existing deployments do not need to redeploy.
+- Republished to npm so the package page on npmjs.com picks up the corrected README. (npm only re-renders the README on a fresh publish — version bumps + dist-tag changes alone don't refresh it.)
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.16-mil.1)
+
 ## [0.8.16-mil.0] — 2026-04-26
 
 ### Added
