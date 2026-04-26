@@ -407,6 +407,28 @@ The LLM-facing tool input field is still named `parentIssueId`
 docs); only the wire payload to Paperclip was renamed. Anyone using
 the upstream adapter directly against Paperclip should bump.
 
+**0.8.14-mil.0 — `result_json` clarity (model/provider populated,
+marker_present renamed):** two follow-ups from the Stage 3 retest. (1)
+`resultJson.modelUsed`, `provider`, and `providerSource` are now
+populated on every successful run, sourced from the adapter's own
+resolver (the same value it logs in the `[hermes] Starting Hermes
+Agent (model=…, provider=…)` banner). Previously these fields were
+only ever set when `parseHermesOutput` could grep them out of stdout,
+which only happens on timed-out runs — meaning every clean successful
+run logged `modelUsed: null`, making post-run "which model paid the
+bill" queries impossible without ECS exec'ing into the container and
+reading the NDJSON log file. (2) `result_marker_present` is the new
+canonical name for the `RESULT:` marker boolean (the adapter-owned
+status v2+ contract); `marker_present` is preserved as a deprecated
+alias for one release because the old name was misleading — operators
+reasonably read it as "test-mode marker present"
+(`<!-- mode: test -->`), which is a different concept entirely. Both
+fields hold the same value through 0.8.x; the alias will be removed in
+0.9.0. `cost_usd` is still `null` for successful runs against Hermes
+Agent v0.9.0 — that's an upstream Hermes Agent quiet-mode limitation
+(no cost line in stdout), tracked as a separate follow-up to call
+OpenRouter's generation endpoint after the run.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
