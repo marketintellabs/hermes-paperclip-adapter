@@ -1755,8 +1755,29 @@ export async function execute(
   // tell at a glance which version of the adapter produced a run —
   // critical during rollouts, hot-patches, and incident forensics where
   // stderr_excerpt may be truncated.
+  //
+  // `modelUsed` / `provider` / `providerSource` come from the adapter's
+  // own resolution (the same values it logs in the
+  // `[hermes] Starting Hermes Agent (model=…, provider=…)` banner), NOT
+  // from parsing Hermes' stdout. That makes them authoritative for
+  // every successful run — previously dashboards had to grep stdout
+  // and got `null` for any run that didn't time out, because Hermes
+  // doesn't echo the model/provider in its quiet-mode output.
+  // `providerSource` is `hermesConfig` for the configured route or
+  // `test-mode-override` when the test-mode flag is winning.
+  //
+  // `cost_usd` is `null` for successful runs against Hermes Agent
+  // v0.9.0 (`v2026.4.13`): the upstream agent does not emit a
+  // cost or token-usage line in stdout/stderr in quiet mode, so
+  // `parseHermesOutput`'s COST_REGEX / TOKEN_USAGE_REGEX never match.
+  // OpenRouter's web dashboard remains the source of truth for spend
+  // until a future adapter release calls the OpenRouter generation
+  // endpoint to backfill `cost_usd` / `usage` after the run.
   const resultJson: Record<string, unknown> = {
     adapterVersion: ADAPTER_VERSION,
+    modelUsed: model,
+    provider: resolvedProvider,
+    providerSource: testMode.active ? "test-mode-override" : resolvedFrom,
     result: cleanedResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,
@@ -1877,8 +1898,22 @@ export async function execute(
       }
       if (executionResult.resultJson && typeof executionResult.resultJson === "object") {
         (executionResult.resultJson as Record<string, unknown>).outcome = finalOutcome;
-        (executionResult.resultJson as Record<string, unknown>).marker_present =
-          marker !== null;
+        // Whether the agent emitted a `RESULT:` marker (the
+        // adapter-owned-status v2+ contract). When `false`, the run
+        // defaulted to `done` with no explicit terminal-status signal
+        // from the LLM; some agents on smaller models miss this
+        // requirement.
+        //
+        // NB: `result_marker_present` is the canonical name (0.8.14+).
+        // `marker_present` is preserved as a deprecated alias for one
+        // release — it was misleading because operators reasonably read
+        // it as "test-mode marker present", which is a different
+        // concept (per-issue test mode). Dashboards/queries should
+        // migrate to `result_marker_present`. Will be removed in
+        // 0.9.0.
+        const markerPresent = marker !== null;
+        (executionResult.resultJson as Record<string, unknown>).result_marker_present = markerPresent;
+        (executionResult.resultJson as Record<string, unknown>).marker_present = markerPresent;
         if (marker?.reason) {
           (executionResult.resultJson as Record<string, unknown>).outcome_reason = marker.reason;
         }

@@ -6,6 +6,22 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.14-mil.0] — 2026-04-25
+
+### Added
+- **`resultJson.modelUsed` / `provider` / `providerSource` are now populated on every successful run.** Dashboards and post-run telemetry queries can now answer "which model did this agent run on?" directly from `heartbeat_runs.result_json` instead of grepping `stderr_excerpt` for the `[hermes] Starting Hermes Agent (model=…)` banner. Values come from the adapter's own model/provider resolver — the same source the banner uses — so they are authoritative even when Hermes' stdout is quiet (which is most successful runs). `providerSource` is `hermesConfig` for the configured route or `test-mode-override` when per-run test mode is winning.
+- **`resultJson.result_marker_present` (canonical name) for the agent's `RESULT:` marker.** This field is set to `true` when the agent's final message contained a `RESULT: done|blocked|cancelled` marker (the v2+ adapter-owned-status contract), `false` when the marker was missing and the run defaulted to `done` with no explicit terminal-status signal from the LLM. The `result_marker_present` name is unambiguous about which marker is being checked.
+
+### Changed
+- **`resultJson.marker_present` is now a deprecated alias of `result_marker_present`.** The old name was misleading because operators reasonably read it as "test-mode marker present" (`<!-- mode: test -->`), which is a completely different concept. The deprecated alias is preserved for one release so existing dashboards / SQL queries continue to work; both fields will hold the same boolean. The alias will be removed in `0.9.0` — migrate to `result_marker_present` now.
+
+### Notes
+- **`resultJson.cost_usd` remains `null` for successful runs against Hermes Agent v0.9.0 (`v2026.4.13`).** This is not a regression and not a bug in 0.8.14 — the upstream Hermes Agent does not emit a cost or token-usage line in stdout/stderr in quiet mode, so `parseHermesOutput`'s `COST_REGEX` / `TOKEN_USAGE_REGEX` never match. The OpenRouter web dashboard remains the source of truth for spend. A future adapter release will call OpenRouter's `GET /api/v1/generation` endpoint after the run completes to backfill `cost_usd` / `usage`; the work is tracked in `marketintellabs/docs/ADAPTER_LIFECYCLE.md` as an open follow-up.
+- **No prompt-template change.** This is a `result_json` shape change only. Agents and MCP tools are unaffected. Safe rolling deploy.
+- **Postmortem reference:** Stage 3 retest (paid-model end-to-end) entry in `marketintellabs/docs/ADAPTER_LIFECYCLE.md` flagged both the `null` cost on successful runs and the misnamed `marker_present` field; this release closes the second item and documents the root cause of the first.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.14-mil.0)
+
 ## [0.8.13-mil.0] — 2026-04-25
 
 ### Fixed
