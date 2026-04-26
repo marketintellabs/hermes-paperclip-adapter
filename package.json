@@ -1,6 +1,6 @@
 {
   "name": "@marketintellabs/hermes-paperclip-adapter",
-  "version": "0.8.15-mil.0",
+  "version": "0.8.16-mil.0",
   "description": "MarketIntelLabs fork of the Paperclip adapter for Hermes Agent — with adapter-owned status transitions, an in-process MCP tool server (paperclip-mcp) that replaces curl-in-prompt with structured tool calls, MIL heartbeat prompt templates, and OpenRouter model-prefix hints",
   "type": "module",
   "license": "MIT",
@@ -50,7 +50,7 @@
     "dev": "tsc --watch",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/**/*.test.js",
+    "test": "tsc && node --test --test-reporter=spec 'dist/**/*.test.js'",
     "clean": "rm -rf dist",
     "prepare": "tsc && chmod +x dist/mcp/cli.js 2>/dev/null || true"
   },

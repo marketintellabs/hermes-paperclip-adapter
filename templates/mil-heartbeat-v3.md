@@ -21,7 +21,16 @@ Available Paperclip MCP tools:
 - `mcp_paperclip_list_my_issues` — your current work queue
 - `mcp_paperclip_get_issue` — full details for one issue
 - `mcp_paperclip_post_issue_comment` — progress updates, delegation notes
-- `mcp_paperclip_create_sub_issue` — delegate work to another agent
+- `mcp_paperclip_create_sub_issue` — delegate ONE sub-task to another
+  agent. Use this for a single delegation.
+- `mcp_paperclip_create_sub_issues` — delegate MULTIPLE sub-tasks at
+  once (e.g. decomposing one investigation into N research streams).
+  All children share the same `parentIssueId`. Capped at 10 children
+  per call. Strongly preferred over N sequential `create_sub_issue`
+  calls when you're delegating more than one item: it costs ONE
+  tool-call slot instead of N, runs the POSTs in parallel, and
+  returns a per-child success/failure array so you can retry only
+  the failed ones.
 - `mcp_paperclip_update_issue_status` — transition your issue to a
   terminal status (`done`, `blocked`, `needs_review`). Call this as
   the LAST tool of your run, right before you end your final message.
@@ -68,8 +77,11 @@ Title: {{taskTitle}}
 2. Work on the task. Use `mcp_paperclip_get_issue` if you need the
    full body + metadata that isn't already included above, and
    `mcp_paperclip_post_issue_comment` for in-run progress updates.
-3. To delegate, call `mcp_paperclip_create_sub_issue` with
-   `parentIssueId: "{{taskId}}"` so the blocker graph stays linked.
+3. To delegate ONE sub-task, call `mcp_paperclip_create_sub_issue`
+   with `parentIssueId: "{{taskId}}"`. To delegate MANY at once
+   (preferred when you're decomposing into 2+ children), call
+   `mcp_paperclip_create_sub_issues` with `parentIssueId: "{{taskId}}"`
+   and an array of `subIssues`. Both keep the blocker graph linked.
 4. As your LAST tool call, call `mcp_paperclip_update_issue_status`
    with `issueId: "{{taskId}}"` and the terminal status you want
    (`done`, `blocked`, or `needs_review`). For `blocked` pass a
@@ -138,7 +150,9 @@ In heartbeat mode the adapter does NOT know which issue you picked up,
 so it will NOT auto-transition status. Mention the issue identifier
 clearly in your summary.
 
-DELEGATION: Use `mcp_paperclip_create_sub_issue` to assign work to
-another agent. Do not use `parentIssueId` unless this delegation is
-tied to an issue you are actively working on.
+DELEGATION: Use `mcp_paperclip_create_sub_issue` for a single
+delegation, or `mcp_paperclip_create_sub_issues` for several at once
+(preferred when you have 2+ items — saves tool-call budget and runs
+in parallel). Do not use either unless this delegation is tied to an
+issue you are actively working on.
 {{/noTask}}

@@ -407,6 +407,42 @@ The LLM-facing tool input field is still named `parentIssueId`
 docs); only the wire payload to Paperclip was renamed. Anyone using
 the upstream adapter directly against Paperclip should bump.
 
+**0.8.16-mil.0 — `create_sub_issues` (plural) for parallel
+delegation:** new MCP tool that takes one shared `parentIssueId` plus
+an array of `subIssues` (capped at 10 per call) and POSTs them via
+`Promise.allSettled`. Singular `create_sub_issue` is preserved
+unchanged for one-off delegations; the plural form is the
+delegator's bulk path. Three concrete wins for the CEO and Heads:
+(1) one MCP-call-budget unit instead of N — a CEO decomposing one
+investigation into 5 research streams used to burn 5 of the 20
+`MAX_TOOL_CALLS` slots; the bulk path collapses that to 1, leaving
+budget for follow-up comments and status updates without raising the
+cap. (2) Wall-clock saving — 5 sequential POSTs typically cost 10–15
+s of the run; parallel `Promise.allSettled` brings that to one RTT
+bounded by the slowest child. (3) Partial-failure semantics — one
+transient 503 on child #3 of 5 can't sink children #1, #2, #4, #5;
+the LLM gets a per-item outcome array with per-index `retryPolicy`
+and can retry only the failed indices. Aggregate retry policy is
+escalated to `fix-args` if ANY child saw a 4xx in an all-failure
+case, so the LLM stops looping on a malformed payload. Test-mode
+marker inheritance is applied per child (idempotent), and the
+wire-shape contract — `parentId` (NOT `parentIssueId`), explicit
+`status: "todo"` so each child fires `on_assign` — lives in a single
+shared `buildPayload` helper to defend the MAR-204/206/207
+(2026-04-25) regression on every child of every batch. Allowlist
+gate: agents with `can_delegate` need both `create_sub_issue` and
+`create_sub_issues` in their `paperclipMcpTools` allowlist —
+companion `paperclip/configure-agents.mjs` + `paperclip/apply-mcp-tools.mjs`
+update grants both. Prompt template `builtin:mil-heartbeat-v3`
+updated to advertise both with explicit guidance ("use plural when
+delegating 2+ items at once"). Drive-by fix: `npm test` script now
+quotes the `'dist/**/*.test.js'` glob so node's native glob
+expansion picks up three-level-deep test files (was relying on `sh`
+globstar which is off by default — silently skipped 54 tests
+including the entire `tools.test.js` suite covering singular
+`create_sub_issue`). Test count jumped 224 → 278 with no behaviour
+change.
+
 **0.8.15-mil.0 — observability bundle (skill preload validation +
 soft-timeout warning):** two pure-add observability hooks that surface
 silent failure modes BEFORE they become incidents. (1) `execute()` now
@@ -661,7 +697,7 @@ Two ways to flip the adapter into test mode (both produce the same overrides —
 - The explicit marker `<!-- mode: test -->` (canonical, zero false-positive risk).
 - One of the intent phrases: `smoketest`, `smoke test`, `smoke-test`, `test mode`, `low-cost validation`, `test flow`.
 
-The adapter probes each spawn's task title + body and routes that one issue's work tree to the free model. Sub-issues created via `create_sub_issue` while in this mode automatically inherit the marker, so the whole delegation tree stays free until it terminates.
+The adapter probes each spawn's task title + body and routes that one issue's work tree to the free model. Sub-issues created via `create_sub_issue` (or `create_sub_issues` for bulk delegation, 0.8.16+) while in this mode automatically inherit the marker, so the whole delegation tree stays free until it terminates.
 
 CEO prompt that reliably trips the override:
 

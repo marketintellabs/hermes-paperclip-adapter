@@ -1,4 +1,5 @@
 import { createSubIssueTool } from "./create-sub-issue.js";
+import { createSubIssuesTool } from "./create-sub-issues.js";
 import { getIssueTool } from "./get-issue.js";
 import { listMyIssuesTool } from "./list-my-issues.js";
 import { postIssueCommentTool } from "./post-issue-comment.js";
@@ -6,6 +7,7 @@ import { updateIssueStatusTool } from "./update-issue-status.js";
 
 export {
   createSubIssueTool,
+  createSubIssuesTool,
   getIssueTool,
   listMyIssuesTool,
   postIssueCommentTool,
@@ -29,5 +31,6 @@ export const ALL_TOOLS = [
   getIssueTool,
   postIssueCommentTool,
   createSubIssueTool,
+  createSubIssuesTool,
   updateIssueStatusTool,
 ] as const;
