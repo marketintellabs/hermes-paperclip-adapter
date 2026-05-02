@@ -7,7 +7,7 @@ It implements the `ServerAdapterModule` interface from `@paperclipai/adapter-uti
 
 MarketIntelLabs maintains this fork. See [`UPSTREAM.md`](./UPSTREAM.md) for
 the divergence list and sync policy, and [`README.md`](./README.md) §"Currently in flight"
-for the active workstream. Current pin: **`0.8.21-mil.0`** (`post_issue_interaction` MCP tool — opt-in writer for Paperclip v2026.428.0's BETA `IssueInteraction` records; registered in the global registry but NOT in any agent's default allowlist; PR 3 of the adapter-0.9 phased rollout). Recent arc: 0.7.x MCP tool server → 0.8.x operational hardening (session-id guards, telemetry, test-mode routing, parallel `create_sub_issues`, skill preload validation, soft-timeout warning, auto-repair detector, retry-with-backoff, transcript cap, `paperclip-hermes-health` CLI, `resolvePromptTemplate` wrapper-prepend defense, run-liveness telemetry, structured issue-thread interactions).
+for the active workstream. Current pin: **`0.8.21-mil.0`** (`post_issue_interaction` MCP tool — opt-in writer for Paperclip v2026.428.0's BETA `IssueInteraction` records; registered in the global registry but NOT in any agent's default allowlist; PR 3 of the adapter-0.9 phased rollout). **In-flight (DRAFT, gated on Gate A pilot soak): `0.9.0-mil.0`** — new builtin `mil-heartbeat-v4` template that documents `post_issue_interaction` and retires the `RESULT:` marker from the prompt surface; both v3 and v4 supported indefinitely so the MIL fleet can flip one agent at a time. Recent arc: 0.7.x MCP tool server → 0.8.x operational hardening (session-id guards, telemetry, test-mode routing, parallel `create_sub_issues`, skill preload validation, soft-timeout warning, auto-repair detector, retry-with-backoff, transcript cap, `paperclip-hermes-health` CLI, `resolvePromptTemplate` wrapper-prepend defense, run-liveness telemetry, structured issue-thread interactions).
 
 ## Structure
 
@@ -15,7 +15,7 @@ for the active workstream. Current pin: **`0.8.21-mil.0`** (`post_issue_interact
 src/
 ├── index.ts              # Root: type, label, models, agentConfigurationDoc
 ├── shared/constants.ts   # Shared constants — regex, defaults,
-│                         # BUILTIN_PROMPT_TEMPLATES (mil-heartbeat{,-v2,-v3}),
+│                         # BUILTIN_PROMPT_TEMPLATES (mil-heartbeat{,-v2,-v3,-v4}),
 │                         # ADAPTER_OWNED_STATUS_TEMPLATES, MCP_TOOL_TEMPLATES
 ├── server/
 │   ├── index.ts          # Re-exports execute + testEnvironment

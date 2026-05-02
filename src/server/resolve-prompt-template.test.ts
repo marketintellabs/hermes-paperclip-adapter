@@ -36,11 +36,39 @@ describe("resolvePromptTemplate", () => {
   });
 
   it("resolves all known builtin templates", () => {
-    for (const name of ["mil-heartbeat", "mil-heartbeat-v2", "mil-heartbeat-v3"]) {
+    for (const name of [
+      "mil-heartbeat",
+      "mil-heartbeat-v2",
+      "mil-heartbeat-v3",
+      "mil-heartbeat-v4",
+    ]) {
       const r = resolvePromptTemplate(`builtin:${name}`);
       assert.equal(r.builtinName, name);
       assert.ok(r.text.length > 0);
     }
+  });
+
+  it("v4 template documents post_issue_interaction kinds and retires the RESULT marker", () => {
+    // Spot-check the v4 template content. Not a full prose audit —
+    // just enough to catch a regression where someone accidentally
+    // ships v3 content under the v4 name (which is exactly the kind
+    // of slip that would silently undo the rollout's whole point).
+    const r = resolvePromptTemplate("builtin:mil-heartbeat-v4");
+    assert.equal(r.builtinName, "mil-heartbeat-v4");
+
+    // Documents the three currently-shipping IssueInteraction kinds.
+    assert.match(r.text, /request_confirmation/);
+    assert.match(r.text, /suggest_tasks/);
+    assert.match(r.text, /ask_user_questions/);
+
+    // The RESULT-marker fallback is intentionally retired from the
+    // prompt surface (the parser still honours it in the adapter for
+    // any v3-pinned agent during the rollout, but we do NOT want v4
+    // agents to learn it). Match the noun phrase rather than the
+    // bare string `RESULT:` because the prompt mentions the marker
+    // exactly once when telling the LLM not to use it.
+    assert.doesNotMatch(r.text, /^RESULT:/m);
+    assert.match(r.text, /Do not\s+emit `RESULT:` markers/);
   });
 
   it("throws on unknown builtin name", () => {

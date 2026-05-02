@@ -772,6 +772,43 @@ and retire markers — gated on a 1-week LinkedIn Strategist pilot
 proving the BETA `IssueInteraction` API behaves correctly in
 production.
 
+**0.9.0-mil.0 — DRAFT (gated on Gate A pilot soak): new builtin
+template `mil-heartbeat-v4`** (`templates/mil-heartbeat-v4.md`).
+Same adapter-owned status semantics and same in-process
+`paperclip-mcp` tool server as `mil-heartbeat-v3`, but additionally:
+(a) retires the `RESULT:` marker from the prompt surface — the
+parser still honours it as a server-side fallback for any v3-pinned
+agent during the v3→v4 rollout window, but v4 agents are no longer
+taught it, so the LLM is funnelled toward
+`mcp_paperclip_update_issue_status` as the canonical completion
+signal; (b) documents the BETA `mcp_paperclip_post_issue_interaction`
+tool with a worked example for each of the three currently-shipping
+kinds (`request_confirmation` for single yes/no decisions like
+publish-vs-hold approvals, `suggest_tasks` for delegator
+decompositions that benefit from operator review before fan-out,
+`ask_user_questions` for specific blocking clarifications);
+(c) explicitly documents when NOT to use `post_issue_interaction`
+(in-run progress, internal coordination, logging) so the LLM
+doesn't over-use the new surface and turn every comment into a
+structured card. `mil-heartbeat-v4` is registered in
+`BUILTIN_PROMPT_TEMPLATES`, `ADAPTER_OWNED_STATUS_TEMPLATES`, and
+`MCP_TOOL_TEMPLATES` in `src/shared/constants.ts` — opts the new
+template into adapter-owned status transitions AND the per-run
+`paperclip-mcp` tool server alongside v3. Both v3 and v4 are
+supported indefinitely so the MIL repo can flip agents one at a
+time and roll back individually if a prompt regression surfaces
+(no adapter-side rollback needed). New unit test in
+`resolve-prompt-template.test.ts` resolves `builtin:mil-heartbeat-v4`,
+asserts each documented `IssueInteraction` kind appears in the
+rendered template, and asserts the marker has been retired from
+the prompt surface (catches a regression where someone accidentally
+ships v3 content under the v4 name). Total adapter test count:
+372 → 373. **Adapter-side scaffolding only** — the 39-agent fleet
+flip + Dockerfile alias bump + promotion of `post_issue_interaction`
+from per-agent override to fleet-wide allowlist all live on the
+MIL-repo side and ship in a separate PR that's gated on the
+LinkedIn Strategist pilot's day-7 verification.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
@@ -801,8 +838,8 @@ Features you get in this fork that upstream doesn't ship:
   mis-captured as a session id.
 - **OpenRouter model-prefix hints** — `anthropic/`, `openai/`, `x-ai/`,
   `zai-org/` model IDs route to `provider: openrouter` automatically.
-- **Two MIL heartbeat prompt templates** shipped in the package
-  (`templates/mil-heartbeat{,-v2,-v3}.md`) selectable via
+- **MIL heartbeat prompt templates** shipped in the package
+  (`templates/mil-heartbeat{,-v2,-v3,-v4}.md`) selectable via
   `promptTemplate: "builtin:<name>"`.
 - **Benign-stderr classifier** (0.4.1+) — stderr only flips
   `errorMessage` on strong failure signatures, not substring matches.

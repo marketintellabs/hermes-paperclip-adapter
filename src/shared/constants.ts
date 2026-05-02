@@ -119,11 +119,34 @@ export const MODEL_PREFIX_PROVIDER_HINTS: [string, string][] = [
  *                         LLM use the in-process `paperclip-mcp` tool
  *                         server instead. See `templates/mil-heartbeat-v3.md`
  *                         and `src/mcp/`.
+ *   `mil-heartbeat-v4`  — Structured-interactions template (0.9.0+).
+ *                         Same adapter-owned status semantics and same
+ *                         MCP tool server as v3, but additionally:
+ *                           - retires the RESULT marker from the prompt
+ *                             surface (the parser still honours it as
+ *                             a fallback for any agent that mistakenly
+ *                             emits one — necessary during the v3→v4
+ *                             rollout window when both templates ship
+ *                             in production).
+ *                           - documents the BETA `post_issue_interaction`
+ *                             tool (kinds: `request_confirmation`,
+ *                             `suggest_tasks`, `ask_user_questions`)
+ *                             with explicit guidance on when each fits.
+ *                           - strengthens `update_issue_status` as THE
+ *                             completion path (already canonical since
+ *                             0.8.0-mil.0; v4 just removes the marker
+ *                             escape hatch from the prompt to push the
+ *                             LLM toward the tool).
+ *                         Both v3 and v4 are supported indefinitely so
+ *                         agents can be flipped one at a time and rolled
+ *                         back individually if a prompt regression
+ *                         surfaces. See `templates/mil-heartbeat-v4.md`.
  */
 export const BUILTIN_PROMPT_TEMPLATES = [
   "mil-heartbeat",
   "mil-heartbeat-v2",
   "mil-heartbeat-v3",
+  "mil-heartbeat-v4",
 ] as const;
 export const BUILTIN_PROMPT_TEMPLATE_PREFIX = "builtin:";
 
@@ -144,6 +167,7 @@ export const BUILTIN_PROMPT_TEMPLATE_PREFIX = "builtin:";
 export const ADAPTER_OWNED_STATUS_TEMPLATES = new Set<string>([
   "mil-heartbeat-v2",
   "mil-heartbeat-v3",
+  "mil-heartbeat-v4",
 ]);
 
 /**
@@ -160,6 +184,7 @@ export const ADAPTER_OWNED_STATUS_TEMPLATES = new Set<string>([
  */
 export const MCP_TOOL_TEMPLATES = new Set<string>([
   "mil-heartbeat-v3",
+  "mil-heartbeat-v4",
 ]);
 
 /** Regex to extract session ID from Hermes CLI output. */
