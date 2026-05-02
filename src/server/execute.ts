@@ -87,6 +87,7 @@ import {
 } from "./retry-policy.js";
 import { createTranscriptCap } from "./transcript-cap.js";
 import { unwrapUserEnv } from "./env-unwrap.js";
+import { LivenessTracker } from "./liveness.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -1602,6 +1603,19 @@ export async function execute(
           preflight: "skipped",
           preflight_reason: decision.reason,
           preflight_open_issue_count: decision.openIssueCount,
+          // Liveness fields (0.8.20-mil.0+). A skipped preflight is a
+          // healthy "active" outcome with a single beat — kept consistent
+          // with full-run shape so dashboards can group by livenessState
+          // without special-casing the skip path.
+          livenessState: "active",
+          progressBeats: [
+            {
+              kind: "preflight_skipped",
+              ts: new Date().toISOString(),
+              detail: decision.reason,
+            },
+          ],
+          nextActionHints: [],
         },
       };
       return skippedResult;
@@ -1853,6 +1867,22 @@ export async function execute(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+  // ── Liveness tracking (0.8.20-mil.0+) ──────────────────────────────────
+  // Pure observation; emits structured `progressBeats[]`,
+  // `livenessState`, and `nextActionHints[]` into result_json so
+  // dashboards can distinguish a clean run from one that brushed its
+  // deadline from one that died mid-run. See src/server/liveness.ts for
+  // wire-format details. The optional `livenessHeartbeatSec` config
+  // schedules periodic `heartbeat_tick` beats while the child is alive
+  // — useful for runs that occasionally spend 5+ minutes in a single
+  // tool call. Default off (no ticks).
+  const liveness = new LivenessTracker();
+  liveness.recordBeat("run_start");
+  const livenessHeartbeatSec = cfgNumber(config.livenessHeartbeatSec);
+  if (typeof livenessHeartbeatSec === "number" && livenessHeartbeatSec > 0) {
+    liveness.startHeartbeat(livenessHeartbeatSec);
+  }
+
   try {
     // Initial attempt + up-to-N retries on transient classification.
     // The loop body is unchanged from the pre-0.8.18 single call;
@@ -1864,6 +1894,15 @@ export async function execute(
         if (softPlan.enabled) {
           if (softTimeoutTimer) clearTimeout(softTimeoutTimer);
           softTimeoutTimer = setTimeout(() => {
+            // Record liveness signal BEFORE the stderr emission so the
+            // structured beat is durable even if the wrappedOnLog call
+            // throws (e.g. network blip on a remote log sink).
+            liveness.markStalled();
+            liveness.recordBeat(
+              "soft_timeout_reached",
+              `threshold=${Math.round(softPlan.threshold * 100)}% delayMs=${softPlan.delayMs}`,
+            );
+            liveness.recordHint("consider raising adapterConfig.timeoutSec");
             void wrappedOnLog(
               "stderr",
               formatSoftTimeoutWarning(softPlan, timeoutSec),
@@ -1907,6 +1946,10 @@ export async function execute(
         reason: verdict.reason,
         pattern: (verdict as { pattern?: string }).pattern,
       });
+      liveness.recordBeat(
+        "retry_triggered",
+        `attempt=${retryAttempts} reason=${verdict.reason}`,
+      );
       await ctx.onLog(
         "stderr",
         formatRetryNotice({
@@ -1926,6 +1969,12 @@ export async function execute(
       clearTimeout(softTimeoutTimer);
       softTimeoutTimer = null;
     }
+    // Stop the liveness heartbeat timer (no-op if disabled). Keeping
+    // this in finally guarantees the periodic-tick interval is cleared
+    // even if the run path threw synchronously — without it, an unref()d
+    // interval would still fire one or two extra ticks before the event
+    // loop drains, polluting result_json on a hard failure.
+    liveness.stopHeartbeat();
     if (perRunHome) {
       try {
         mcpTelemetry = await collectMcpTelemetry(
@@ -1968,6 +2017,18 @@ export async function execute(
   );
   if (parsed.sessionId) {
     await ctx.onLog("stdout", `[hermes] Session: ${parsed.sessionId}\n`);
+  }
+
+  // Hard timeout is the canonical "agent never came back" terminal
+  // state. It supersedes any earlier `stalled` we set when the
+  // soft-timeout fired — the run actually ran past its budget and got
+  // SIGTERM'd. Dashboards filtering on `livenessState=dead` should pick
+  // these up alongside MCP-subprocess crashes.
+  if (result.timedOut) {
+    liveness.markDead("hard_timeout");
+    liveness.recordHint(
+      "consider raising adapterConfig.timeoutSec or splitting work into sub-issues",
+    );
   }
 
   // ── Build result ───────────────────────────────────────────────────────
@@ -2044,6 +2105,13 @@ export async function execute(
   if (retryHistory.length > 0) {
     resultJson.retries = retryHistory;
     resultJson.retryAttempts = retryHistory.length;
+    // Surfacing this as a hint (not a hard error) because retry succeeded
+    // by definition if we reached this branch — but if a specific agent
+    // is consistently retrying, the operator should investigate the
+    // upstream provider rather than treating the run as fully healthy.
+    liveness.recordHint(
+      "investigate upstream LLM transient failures (run completed via retry)",
+    );
     await ctx.onLog(
       "stdout",
       `[hermes] retry summary: ${retryHistory.length} retry(ies) triggered ` +
@@ -2059,6 +2127,14 @@ export async function execute(
     resultJson.transcriptObserved = transcriptCap.observed();
     resultJson.transcriptSuppressed = transcriptCap.suppressed();
     resultJson.transcriptTruncated = transcriptCap.truncated();
+    if (transcriptCap.truncated()) {
+      // Truncation is structural — the operator's view of the run is
+      // missing chunks. Suggest raising the cap so future runs from the
+      // same agent retain full transcript fidelity.
+      liveness.recordHint(
+        "consider raising adapterConfig.maxTranscriptEntries (transcript was truncated)",
+      );
+    }
   }
 
   // ── MCP telemetry → resultJson ────────────────────────────────────────
@@ -2093,6 +2169,15 @@ export async function execute(
         `paperclip-mcp subprocess (pid ${mcpTelemetry.health.pid}) died mid-run; ` +
         `tool calls after that point would have silently failed. ` +
         (executionResult.errorMessage ? `Also: ${executionResult.errorMessage}` : "");
+      // Mirror the failure into liveness state. A `dead` run with the
+      // `mcp_subprocess_died` reason hint is the canonical signal that
+      // the tool plane went away — distinct from `hard_timeout` (the
+      // agent ran past its deadline) and `tool_bypass_attempt` (the
+      // agent ignored the tool plane).
+      liveness.markDead("mcp_subprocess_died");
+      liveness.recordHint(
+        "investigate paperclip-mcp crash (subprocess died mid-run)",
+      );
     }
   }
 
@@ -2147,6 +2232,16 @@ export async function execute(
     ).length;
     resultJson.autoRepairCount = autoRepairs.length;
     resultJson.autoRepairUnauthorizedCount = unauthorizedCount;
+    if (unauthorizedCount > 0) {
+      // Unauthorized auto-repair = Hermes silently mapped a tool the
+      // agent's allowlist forbids onto something that IS allowed. The
+      // run "succeeded" but the LLM's actual intent was lost. Hint the
+      // operator at the prompt-template / allowlist drift that caused
+      // it — see src/server/auto-repair-detector.ts for the rationale.
+      liveness.recordHint(
+        "investigate agent allowlist drift (unauthorized auto-repair detected)",
+      );
+    }
     await ctx.onLog(
       "stderr",
       `[hermes] auto-repair summary: ${autoRepairs.length} rewrite(s) ` +
@@ -2154,6 +2249,19 @@ export async function execute(
         `lines above for the original→repaired tool names.\n`,
     );
   }
+
+  // ── Liveness finalization (0.8.20-mil.0+) ─────────────────────────────
+  // Record the terminal beat just before we stamp result_json. Doing
+  // this AFTER all upstream state checks (timedOut, mcp died, retry,
+  // transcript truncation, auto-repair) so the snapshot below carries
+  // the final livenessState + the full deduped hint set. Wire-format
+  // additive — older Paperclip versions persist the JSONB without
+  // acting on these fields.
+  liveness.recordBeat("run_end");
+  const livenessSummary = liveness.summary();
+  resultJson.livenessState = livenessSummary.livenessState;
+  resultJson.progressBeats = livenessSummary.progressBeats;
+  resultJson.nextActionHints = livenessSummary.nextActionHints;
 
   executionResult.resultJson = resultJson;
 

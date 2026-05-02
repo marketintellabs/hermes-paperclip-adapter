@@ -679,6 +679,54 @@ returns identical bytes to pre-0.8.19 for any clean bare
 `builtin:<name>` input). 14 new unit tests in
 `resolve-prompt-template.test.ts`. Total test count: 328 → 342.
 
+**0.8.20-mil.0 — Run-liveness telemetry (additive `result_json`
+fields, adopts the structured shape introduced upstream by
+Paperclip v2026.428.0 #4083):** every Hermes run now emits
+`result_json.livenessState` (`active` / `stalled` / `dead`),
+`result_json.progressBeats[]` (chronological structured events
+with ISO timestamps and an opaque `detail` string), and
+`result_json.nextActionHints[]` (deduped, sorted operator
+suggestions). Dashboards / postmortems / a future Staff Engineer
+agent can distinguish three terminal verdicts without parsing the
+run transcript: a clean run lands as `active` with `[run_start,
+run_end]` beats and zero hints; a run that brushed its
+soft-timeout deadline lands as `stalled` with a
+`soft_timeout_reached` beat and a `consider raising
+adapterConfig.timeoutSec` hint; a hard-timed-out or MCP-crashed
+run lands as `dead` with the reason hint (`hard_timeout` /
+`mcp_subprocess_died`) plus an actionable next-step. Hooks fire
+from existing observation points in `execute.ts` so there's no
+new run path: the soft-timeout `setTimeout` callback marks
+`stalled` and beats `soft_timeout_reached` BEFORE the stderr
+emission (durable even if the log sink throws); each retry
+attempt beats `retry_triggered` with the classifier reason; the
+MCP-died telemetry block calls `markDead("mcp_subprocess_died")`
+alongside the existing `tool_server_died` errorCode;
+`result.timedOut` after the runChildProcess loop calls
+`markDead("hard_timeout")`; transcript-cap truncation, retry
+success, and unauthorized auto-repair each contribute a hint;
+the terminal `run_end` beat is recorded last so `result_json`
+reflects the fully-resolved hint set. The preflight skip path
+(zero-LLM-cost wakes) lands consistent shape with a single
+`preflight_skipped` beat so dashboards don't have to special-case
+it. Optional `adapterConfig.livenessHeartbeatSec` config (default
+off, clamped to a 5-second floor) emits periodic
+`heartbeat_tick` beats with `detail=elapsed=<sec>s` while the
+child is alive — useful for runs that occasionally spend 5+
+minutes in a single tool call. The interval is `unref()`d so it
+never holds the event loop open past `stopHeartbeat()`, and
+`stopHeartbeat()` lives in `runChildProcess`'s `finally` so a
+synchronous throw can't leak the timer. 18 new unit tests in
+`liveness.test.ts` (state machine invariants, timestamp shape,
+hint dedupe + sorted snapshot, `summary()` returns fresh array
+copies, `startHeartbeat` no-op for zero/negative intervals,
+heartbeat lifecycle, four integration-shape tests pinning the
+wire format for typical successful / soft-timeout / MCP-crash /
+hard-timeout-supersedes-stalled runs). Total test count: 342 →
+360. Wire-format additive — older Paperclip versions persist the
+new JSONB fields without acting on them, so this is safe to ship
+ahead of any consumer-side code.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
