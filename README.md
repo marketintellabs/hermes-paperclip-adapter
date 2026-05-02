@@ -727,6 +727,51 @@ hard-timeout-supersedes-stalled runs). Total test count: 342 →
 new JSONB fields without acting on them, so this is safe to ship
 ahead of any consumer-side code.
 
+**0.8.21-mil.0 — `post_issue_interaction` MCP tool (opt-in writer
+for Paperclip v2026.428.0's structured `IssueInteraction` records,
+BETA upstream API):** new `src/mcp/tools/post-issue-interaction.ts`
+exposes Paperclip's `POST /api/issues/:id/interactions` endpoint
+as a typed MCP tool. Supports the three currently-shipping
+interaction kinds: `suggest_tasks` (proposed sub-issues with
+optional cost/effort hints), `ask_user_questions` (multi-question
+form with `text` / `single_select` / `multi_select` / `number` /
+`boolean` / `date` controls), and `request_confirmation` (publish
+vs. hold cards with `confirm_label` / `decline_label` /
+`risk_level`). Tool input schema mirrors upstream
+`createIssueThreadInteractionSchema` from
+`packages/shared/src/validators/issue.ts`, surfaces the persisted
+record as the structured tool result, and threads the run id
+through `sourceRunId` automatically (read from
+`process.env.PAPERCLIP_RUN_ID`, which `runChildProcess` already
+injects into the spawned MCP child) so the board UI can correlate
+every interaction back to the run that authored it. Idempotency-key
+support and optional `title` / `summary` / `continuationPolicy`
+fields land per the upstream payload contract. **The tool is
+registered in the global registry but NOT in any agent's default
+allowlist** — agents only get it when their `paperclipMcpTools`
+config includes the name explicitly. This is the BETA-API soak
+switch: a single Tier-2 pilot agent (LinkedIn Strategist) gets it
+in this release; the marker convention (`<!-- mode: test -->`,
+`RESULT: done`) continues to work unchanged for the other 38
+agents until `0.9.0-mil.0` flips the fleet to v4 prompts and
+retires markers. Per-tool error classification: 4xx (validation /
+bad payload shape) → `retryPolicy=fix-args` and the upstream zod
+issue body is forwarded verbatim into the tool result text so the
+LLM can read which `payload.<field>` failed; 5xx and bare network
+errors → `retryPolicy=retry`; 401 / 403 → `retryPolicy=abort`
+(auth is wired by the adapter, not something the LLM can fix).
+22 new unit tests in `post-issue-interaction.test.ts` (happy-path
+round-trips for each kind, optional-field threading,
+`sourceRunId` injection from `PAPERCLIP_RUN_ID`, scope-violation
+rejection, full HTTP-status classification matrix). Total adapter
+test count: 360 → 372. Wire-format additive only — pre-0.8.21
+agents continue to operate exclusively through `post_issue_comment`
++ RESULT markers. PR 3 of the adapter-0.9 phased rollout; PR 4
+(`0.9.0-mil.0`) will ship `mil-heartbeat-v4`, flip all 39 agents,
+and retire markers — gated on a 1-week LinkedIn Strategist pilot
+proving the BETA `IssueInteraction` API behaves correctly in
+production.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
