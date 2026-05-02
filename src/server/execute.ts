@@ -88,6 +88,7 @@ import {
 import { createTranscriptCap } from "./transcript-cap.js";
 import { unwrapUserEnv } from "./env-unwrap.js";
 import { LivenessTracker } from "./liveness.js";
+import { classifyLlmError } from "./llm-error-classifier.js";
 
 // ---------------------------------------------------------------------------
 // Config helpers
@@ -2250,13 +2251,60 @@ export async function execute(
     );
   }
 
+  // ── LLM-API failure classification (0.9.1-mil.0+) ─────────────────────
+  // When an LLM provider rejects the call before the agent can produce
+  // any actual output, the upstream error string lands verbatim in
+  // `parsed.response` (the LLM's "final message" — a misnomer in this
+  // case because the provider answered, not the model). Pre-0.9.1 this
+  // text sat in `result_json.result` as a raw blob and the operator
+  // had to grep it; the 2026-05-01 fleet audit found 100+ runs across
+  // CEO / Investigative Correspondent / Managing Editor failing with
+  // exactly the same OpenRouter HTTP 402 budget message, all unflagged.
+  //
+  // We now inspect the response (and `executionResult.errorMessage`
+  // for runs where the provider error landed there instead), classify
+  // any matching pattern into a stable `errorCode`, and emit an
+  // operator-actionable hint. Patterns covered: HTTP 402 budget
+  // exhaustion, HTTP 401/403 auth, HTTP 429 rate-limit, generic
+  // "failed after N retries". See `llm-error-classifier.ts` for the
+  // pattern set + per-class behaviour rationale (only 402/401/403/
+  // exhausted-retries call `markDead`; 429 stays soft because the
+  // next wake may succeed).
+  //
+  // Runs against `mil-heartbeat-v2+` already get adapter-owned status
+  // reconciliation downstream, so flagging the run dead here doesn't
+  // alter status — it only enriches the telemetry surface so dashboards
+  // / postmortems / a future Staff Engineer agent can filter on
+  // `errorCode` instead of running a regex over `result`.
+  const llmErr =
+    classifyLlmError(cleanedResponse, resolvedProvider) ||
+    classifyLlmError(executionResult.errorMessage, resolvedProvider);
+  if (llmErr) {
+    resultJson.errorCode = llmErr.errorCode;
+    resultJson.errorEvidence = llmErr.evidence;
+    liveness.recordHint(llmErr.hint);
+    if (llmErr.dead) {
+      liveness.markDead(llmErr.errorCode);
+    } else {
+      // Soft-failure modes (rate limit) — promote to stalled if the
+      // tracker is still active. This keeps `dead` reserved for the
+      // verdicts where the operator must intervene before the next
+      // wake will succeed.
+      liveness.markStalled();
+    }
+    await ctx.onLog(
+      "stderr",
+      `[hermes] LLM-API failure classified: ${llmErr.errorCode} (evidence="${llmErr.evidence.slice(0, 120).replace(/\n/g, " ")}")\n`,
+    );
+  }
+
   // ── Liveness finalization (0.8.20-mil.0+) ─────────────────────────────
   // Record the terminal beat just before we stamp result_json. Doing
   // this AFTER all upstream state checks (timedOut, mcp died, retry,
-  // transcript truncation, auto-repair) so the snapshot below carries
-  // the final livenessState + the full deduped hint set. Wire-format
-  // additive — older Paperclip versions persist the JSONB without
-  // acting on these fields.
+  // transcript truncation, auto-repair, llm-api classification) so the
+  // snapshot below carries the final livenessState + the full deduped
+  // hint set. Wire-format additive — older Paperclip versions persist
+  // the JSONB without acting on these fields.
   liveness.recordBeat("run_end");
   const livenessSummary = liveness.summary();
   resultJson.livenessState = livenessSummary.livenessState;
