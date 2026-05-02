@@ -772,8 +772,8 @@ and retire markers — gated on a 1-week LinkedIn Strategist pilot
 proving the BETA `IssueInteraction` API behaves correctly in
 production.
 
-**0.9.0-mil.0 — DRAFT (gated on Gate A pilot soak): new builtin
-template `mil-heartbeat-v4`** (`templates/mil-heartbeat-v4.md`).
+**0.9.0-mil.0 — DRAFT (Gate A passed via forced test 2026-05-02):
+new builtin template `mil-heartbeat-v4`** (`templates/mil-heartbeat-v4.md`).
 Same adapter-owned status semantics and same in-process
 `paperclip-mcp` tool server as `mil-heartbeat-v3`, but additionally:
 (a) retires the `RESULT:` marker from the prompt surface — the
@@ -808,6 +808,41 @@ flip + Dockerfile alias bump + promotion of `post_issue_interaction`
 from per-agent override to fleet-wide allowlist all live on the
 MIL-repo side and ship in a separate PR that's gated on the
 LinkedIn Strategist pilot's day-7 verification.
+
+**0.9.1-mil.0 — DRAFT: LLM-API failure classifier — promotes
+provider failure modes from raw `result_json.result` text to
+first-class `errorCode` + `nextActionHints[]` telemetry.** New
+`src/server/llm-error-classifier.ts` inspects each run's final-
+message text for known LLM-provider failure signatures and emits
+a stable errorCode + an operator-actionable one-liner. Patterns
+covered (every regex anchored on a real production failure
+harvested in the 2026-05-02 fleet audit): HTTP 402 budget /
+credit exhaustion → `provider_budget_exhausted`; HTTP 401 / 403
+auth → `provider_auth_failed`; HTTP 429 rate-limit →
+`provider_rate_limited` (NOT marked dead — the next wake may
+succeed); "failed after N retries" generic fallback →
+`llm_call_exhausted_retries`. Provider name is text-derived first
+(URL signatures: openrouter.ai / api.anthropic.com /
+api.openai.com / api.deepinfra.com|huggingface.co) with the
+adapter's `resolvedProvider` as the fallback so the hint stays
+accurate even when Hermes routes through a meta-router. Wire-up
+in `execute.ts` between auto-repair detection and the existing
+liveness finalization: sets `resultJson.errorCode`, sets
+`resultJson.errorEvidence` (capped 240 chars — operator-readable
+quote of the matched substring), calls
+`liveness.recordHint(hint)` so the actionable next step lands in
+`result_json.nextActionHints[]`, and (only for the budget / auth /
+exhausted-retries cases that definitively kill the run) calls
+`liveness.markDead(errorCode)`. Solves a real production health
+gap: the 2026-05-02 fleet audit found 118 of the most recent 200
+runs in the failed/timed-out state with OpenRouter HTTP 402
+budget exhaustion as the dominant cause, all silently bleeding
+into raw text. After this release the same failure mode lands as
+structured telemetry that dashboards / a future Staff Engineer
+agent can filter / aggregate / alert on. 18 new unit tests in
+`llm-error-classifier.test.ts`. Total adapter test count: 373 →
+391. Pure additive — no behaviour change for runs that aren't
+already failing.
 
 ## MIL-specific features
 
