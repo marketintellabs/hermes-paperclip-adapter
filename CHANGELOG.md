@@ -6,6 +6,19 @@ This file is a condensed, human-readable summary. For full context (test coverag
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.8.19-mil.0] — 2026-05-02
+
+### Fixed
+- **`resolvePromptTemplate` is now robust to wrapper-prepended input — required for Paperclip v2026.428.0+ compatibility.** Paperclip v2026.428.0 added an `authGuardPrompt` wrapper around its in-tree `hermes_local` adapter (`server/src/adapters/registry.ts`) that PREPENDS a four-line block to `adapterConfig.promptTemplate` before passing it through to our `execute()`. The wrapper turns the canonical configuration `"builtin:mil-heartbeat-v3"` into `"Paperclip API safety rule: …\n\nbuiltin:mil-heartbeat-v3"`, which fails the `raw.startsWith("builtin:")` check at the top of `resolvePromptTemplate`. Pre-0.8.19 the function silently fell into "raw template" mode on any wrapper-prepend: `builtinName` returned `null`, which meant the run lost adapter-owned status transitions, the `paperclip-mcp` per-run tool server, AND Mustache `{{var}}` substitution — agents would essentially no-op. The new `loadBuiltinTemplate` helper splits resolution into two paths: (a) **strict legacy** for single-line `builtin:<name>` input — throws on unknown names so operator typos surface loudly; (b) **wrapper-prepend defense** for multi-line input — scans every line for a `builtin:<known-name>` reference, first match wins, unknown names are ignored (so prose like `"see builtin:typo if you want"` can never hijack resolution). Verified against the literal v2026.428.0 wrapper, multi-layer prepends, CRLF line endings, and trimmed-name lookup. Without this fix, bumping `paperclip:latest` to v2026.428.0 would silently break all 39 MIL agents.
+- **`resolvePromptTemplate` and `ResolvedTemplate` are now exported from `src/server/execute.ts`.** Previously private; tests now exercise them directly via `src/server/resolve-prompt-template.test.ts` (14 cases covering bare/strict/wrapper/CRLF/trim/unknown-name/path-A-vs-B branches).
+
+### Notes
+- **Pure defense — no wire-format, prompt-template, or run-behaviour change for currently-deployed agents.** When the input is a clean bare `builtin:<name>` reference (today's MIL deployment), Path A returns identical bytes to pre-0.8.19. The new behaviour only fires when an upstream wrapper prepends content above the builtin line.
+- **Defends against future Paperclip wrapper layers as well.** Any number of stacked wrappers can prepend their own boilerplate; as long as the canonical `builtin:<name>` line is preserved verbatim somewhere in the input, our adapter resolves correctly.
+- 14 new unit tests; total adapter test count: 328 → 342.
+
+[Full release notes →](https://github.com/marketintellabs/hermes-paperclip-adapter/releases/tag/v0.8.19-mil.0)
+
 ## [0.8.18-mil.0] — 2026-04-26
 
 ### Added

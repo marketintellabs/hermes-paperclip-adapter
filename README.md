@@ -649,6 +649,36 @@ probe succeeds, hermes-binary fail, $HERMES_HOME-missing fail,
 network warns instead of fails, non-2xx warns, `--no-network`
 honoured). Total test count: 328 → 358.
 
+**0.8.19-mil.0 — `resolvePromptTemplate` is now robust to
+wrapper-prepended input — required for Paperclip v2026.428.0+
+compatibility:** Paperclip v2026.428.0 added an `authGuardPrompt`
+wrapper around its in-tree `hermes_local` adapter that PREPENDS a
+four-line block to `adapterConfig.promptTemplate` before passing it
+through to our `execute()`. The wrapper turns the canonical
+configuration `"builtin:mil-heartbeat-v3"` into
+`"Paperclip API safety rule: …\n\nbuiltin:mil-heartbeat-v3"`, which
+fails the `raw.startsWith("builtin:")` check at the top of
+`resolvePromptTemplate`. Pre-0.8.19 the function silently fell into
+"raw template" mode on any wrapper-prepend: `builtinName` returned
+`null`, which meant the run lost adapter-owned status transitions,
+the `paperclip-mcp` per-run tool server, AND Mustache `{{var}}`
+substitution — agents would essentially no-op. The new
+`loadBuiltinTemplate` helper splits resolution into two paths:
+(a) **strict legacy** for single-line `builtin:<name>` input —
+throws on unknown names so operator typos surface loudly;
+(b) **wrapper-prepend defense** for multi-line input — scans every
+line for a `builtin:<known-name>` reference, first match wins,
+unknown names are ignored (so prose like
+`"see builtin:typo if you want"` can never hijack resolution).
+Verified against the literal v2026.428.0 wrapper, multi-layer
+prepends, CRLF line endings, and trimmed-name lookup. Without this
+fix, bumping `paperclip:latest` to v2026.428.0 would silently break
+all 39 MIL agents. Pure defense — no wire-format, prompt-template,
+or run-behaviour change for currently-deployed agents (Path A
+returns identical bytes to pre-0.8.19 for any clean bare
+`builtin:<name>` input). 14 new unit tests in
+`resolve-prompt-template.test.ts`. Total test count: 328 → 342.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:

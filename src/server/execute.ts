@@ -456,7 +456,7 @@ Address the comment, POST a reply if needed, then continue working.
 4. If truly nothing to do, report briefly what you checked.
 {{/noTask}}`;
 
-interface ResolvedTemplate {
+export interface ResolvedTemplate {
   /** Rendered template text (with {{var}} placeholders unresolved). */
   text: string;
   /**
@@ -477,21 +477,61 @@ interface ResolvedTemplate {
  * template by name instead of shipping a giant string in every agent's
  * adapterConfig. The returned `builtinName` lets downstream code enable
  * per-template behaviours such as adapter-owned status transitions.
+ *
+ * Wrapper-prepend defense: Paperclip v2026.428.0 introduced a wrapper
+ * around our `execute()` that PREPENDS an authGuardPrompt block to
+ * `adapterConfig.promptTemplate` before passing it through (see
+ * `paperclip/server/src/adapters/registry.ts hermesLocalAdapter`). That
+ * turns `"builtin:mil-heartbeat-v3"` into
+ * `"<auth guard boilerplate>\n\nbuiltin:mil-heartbeat-v3"`, which fails
+ * the naive `raw.startsWith("builtin:")` check and silently falls into
+ * "raw template" mode — losing adapter-owned status transitions, the
+ * paperclip-mcp tool server, and Mustache substitution. Defend by
+ * scanning every line for a `builtin:<known-name>` reference; the first
+ * match wins. The match still has to be a known template name, so
+ * incidental occurrences in user prose can't accidentally hijack
+ * resolution.
  */
-function resolvePromptTemplate(raw: string | undefined): ResolvedTemplate {
+export function resolvePromptTemplate(raw: string | undefined): ResolvedTemplate {
   if (!raw) return { text: DEFAULT_PROMPT_TEMPLATE, builtinName: null };
-  if (!raw.startsWith(BUILTIN_PROMPT_TEMPLATE_PREFIX)) {
-    return { text: raw, builtinName: null };
-  }
 
-  const name = raw.slice(BUILTIN_PROMPT_TEMPLATE_PREFIX.length);
-  if (!(BUILTIN_PROMPT_TEMPLATES as readonly string[]).includes(name)) {
-    throw new Error(
-      `Unknown builtin promptTemplate "${raw}". ` +
-        `Available: ${BUILTIN_PROMPT_TEMPLATES.map((n) => BUILTIN_PROMPT_TEMPLATE_PREFIX + n).join(", ")}`,
+  const trimmed = raw.trim();
+  const isSingleLine = !/\r?\n/.test(trimmed);
+
+  // Path A — strict legacy: the entire trimmed input is `builtin:<name>`
+  // with nothing else on it. Throws on unknown names so operator typos
+  // surface loudly instead of silently falling into raw-template mode.
+  if (isSingleLine && trimmed.startsWith(BUILTIN_PROMPT_TEMPLATE_PREFIX)) {
+    return loadBuiltinTemplate(
+      trimmed.slice(BUILTIN_PROMPT_TEMPLATE_PREFIX.length).trim(),
+      trimmed,
     );
   }
 
+  // Path B — wrapper-prepend defense: scan multi-line input for a line
+  // whose trimmed content is `builtin:<known-name>`. First match wins.
+  // Unlike Path A this branch does NOT throw on unknown names — user
+  // prose may mention `builtin:` incidentally and we don't want a
+  // sentence like "see builtin:typo if you want" to hijack resolution.
+  for (const line of raw.split(/\r?\n/)) {
+    const candidate = line.trim();
+    if (!candidate.startsWith(BUILTIN_PROMPT_TEMPLATE_PREFIX)) continue;
+    const candidateName = candidate.slice(BUILTIN_PROMPT_TEMPLATE_PREFIX.length).trim();
+    if ((BUILTIN_PROMPT_TEMPLATES as readonly string[]).includes(candidateName)) {
+      return loadBuiltinTemplate(candidateName, `${BUILTIN_PROMPT_TEMPLATE_PREFIX}${candidateName}`);
+    }
+  }
+
+  return { text: raw, builtinName: null };
+}
+
+function loadBuiltinTemplate(name: string, source: string): ResolvedTemplate {
+  if (!(BUILTIN_PROMPT_TEMPLATES as readonly string[]).includes(name)) {
+    throw new Error(
+      `Unknown builtin promptTemplate "${source}". ` +
+        `Available: ${BUILTIN_PROMPT_TEMPLATES.map((n) => BUILTIN_PROMPT_TEMPLATE_PREFIX + n).join(", ")}`,
+    );
+  }
   // Templates live at <package-root>/templates/<name>.md.
   // From dist/server/execute.js that's three levels up.
   const here = dirname(fileURLToPath(import.meta.url));
