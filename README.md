@@ -244,9 +244,9 @@ slot-collision / partial-merge / defensive-shape paths.
 **0.8.10-mil.0 — test-mode model override:** process-wide flag that
 swaps every spawn to a free OpenRouter model without touching any
 agent / company / routine configuration. Set
-`PAPERCLIP_ADAPTER_TEST_MODE=1` on the adapter process (or ECS task
-definition) and ALL agents in that process route to a free model for
-the duration of the run. Original `model` / `provider` /
+`PAPERCLIP_ADAPTER_TEST_MODE=1` on the adapter process and ALL
+agents in that process route to a free model for the duration of
+the run. Original `model` / `provider` /
 `auxiliaryModels` from the agent's adapterConfig are ignored; the
 prompt template, MCP tool allowlist, role/department/skills, and
 routine schedule are unchanged. Defaults to the OpenRouter `openrouter/free`
@@ -277,7 +277,7 @@ spending $5–$15 per attempt, validating that wake-on-assign + MCP +
 status reconciliation work end-to-end after an infra change.
 
 **0.8.11-mil.0 — per-issue test mode + sub-issue inheritance:** day-to-day
-UX layer on top of 0.8.10. Operators (or the CEO agent) can flip a
+UX layer on top of 0.8.10. Operators can flip a
 *single* issue into test mode by either:
 
 - including the explicit machine-readable marker `<!-- mode: test -->`
@@ -303,20 +303,14 @@ their description don't double-add.
 
 **Source-of-truth in the banner.** The `*** TEST MODE ACTIVE ***` line
 now ends with `source=<env|issue-marker|issue-intent> detail="<phrase
-or marker>"` so a single grep answers "where did this activation come
-from?" — operator big-hammer, CEO's smoketest issue, or inherited from
-a parent run.
+or marker>"` so a single grep answers where the activation came
+from.
 
 **Activation priority:** env var > issue-marker > issue-intent > prod.
 Env wins because it's the incident-response lever; per-issue activation
-is the day-to-day UX. Recommended CEO prompt: *"Run a smoketest of the
-system in low-cost validation mode. Validate pipeline integrity
-end-to-end (wake-on-assign, MCP tool calls, status reconciliation,
-sub-agent delegation). Don't worry about output quality — free models
-are inconsistent under tool-use load."* Either phrase trips the
-override, sub-agents inherit automatically. 24 new tests cover marker
-detection, intent matching with false-positive guards, env-vs-issue
-precedence, MCP env emission, sub-issue prepending, and idempotency.
+is the day-to-day UX. 24 new tests cover marker detection, intent
+matching with false-positive guards, env-vs-issue precedence, MCP env
+emission, sub-issue prepending, and idempotency.
 
 Rollout is gated per-agent by `adapterConfig.promptTemplate`: flip one
 agent to `builtin:mil-heartbeat-v3` at a time, flip back to v2 to roll
@@ -372,8 +366,8 @@ process-wide `PAPERCLIP_ADAPTER_TEST_MODE=1` env var has always worked
 and is unaffected.
 
 **0.8.13-mil.0 — fix `create_sub_issue` orphans + missing wake on
-delegated children:** uncovered during the Stage 3 paid-model retest
-that followed 0.8.12. The MCP `create_sub_issue` tool was sending
+delegated children:** uncovered during a paid-model retest after
+0.8.12. The MCP `create_sub_issue` tool was sending
 `parentIssueId` in the POST body to Paperclip's
 `POST /companies/:id/issues`. Paperclip's payload schema uses the
 column-aligned name `parentId` and silently drops unknown fields, so
@@ -397,7 +391,7 @@ but not the field Paperclip *read*. The new test fixtures the actual
 API contract:
 
 ```js
-assert.equal(body.parentId, "MAR-30");
+assert.equal(body.parentId, "<issue-uuid>");
 assert.equal(body.parentIssueId, undefined);
 assert.equal(body.status, "todo");
 ```
@@ -408,7 +402,7 @@ docs); only the wire payload to Paperclip was renamed. Anyone using
 the upstream adapter directly against Paperclip should bump.
 
 **0.8.14-mil.0 — `result_json` clarity (model/provider populated,
-marker_present renamed):** two follow-ups from the Stage 3 retest. (1)
+marker_present renamed):** two follow-ups from the paid-model retest. (1)
 `resultJson.modelUsed`, `provider`, and `providerSource` are now
 populated on every successful run, sourced from the adapter's own
 resolver (the same value it logs in the `[hermes] Starting Hermes
@@ -416,7 +410,7 @@ Agent (model=…, provider=…)` banner). Previously these fields were
 only ever set when `parseHermesOutput` could grep them out of stdout,
 which only happens on timed-out runs — meaning every clean successful
 run logged `modelUsed: null`, making post-run "which model paid the
-bill" queries impossible without ECS exec'ing into the container and
+bill" queries impossible without exec'ing into the container and
 reading the NDJSON log file. (2) `result_marker_present` is the new
 canonical name for the `RESULT:` marker boolean (the adapter-owned
 status v2+ contract); `marker_present` is preserved as a deprecated
@@ -438,9 +432,9 @@ falling back to `/data/hermes/skills`) before pre-flight; each
 declared-but-missing skill produces a `[hermes] WARN: skill "<ref>"
 declared in adapterConfig … but not found at <abspath> — Hermes will
 run WITHOUT this skill` line on stderr, and a single rollup line on
-stdout. Previously a renamed-or-unmounted skill file (`persona-sarah-chen.md`
-moved on EFS, etc.) ran without the persona and the operator only
-noticed because the output sounded wrong. (2) Soft-timeout warning at
+stdout. Previously a renamed-or-unmounted skill file ran without the
+declared persona and the operator only noticed because the output
+sounded wrong. (2) Soft-timeout warning at
 80% of `timeoutSec` — `[hermes] WARN: soft-timeout reached at <N>s
 (80% of <T>s hard limit). Run still in progress; consider raising
 adapterConfig.timeoutSec if this becomes routine.` lands in the run
@@ -461,9 +455,9 @@ delegation:** new MCP tool that takes one shared `parentIssueId` plus
 an array of `subIssues` (capped at 10 per call) and POSTs them via
 `Promise.allSettled`. Singular `create_sub_issue` is preserved
 unchanged for one-off delegations; the plural form is the
-delegator's bulk path. Three concrete wins for the CEO and Heads:
-(1) one MCP-call-budget unit instead of N — a CEO decomposing one
-investigation into 5 research streams used to burn 5 of the 20
+delegator's bulk path. Three concrete wins for delegator-class
+agents: (1) one MCP-call-budget unit instead of N — a delegator
+decomposing one task into 5 sub-tasks used to burn 5 of the 20
 `MAX_TOOL_CALLS` slots; the bulk path collapses that to 1, leaving
 budget for follow-up comments and status updates without raising the
 cap. (2) Wall-clock saving — 5 sequential POSTs typically cost 10–15
@@ -477,14 +471,12 @@ case, so the LLM stops looping on a malformed payload. Test-mode
 marker inheritance is applied per child (idempotent), and the
 wire-shape contract — `parentId` (NOT `parentIssueId`), explicit
 `status: "todo"` so each child fires `on_assign` — lives in a single
-shared `buildPayload` helper to defend the MAR-204/206/207
-(2026-04-25) regression on every child of every batch. Allowlist
-gate: agents with `can_delegate` need both `create_sub_issue` and
-`create_sub_issues` in their `paperclipMcpTools` allowlist —
-companion `paperclip/configure-agents.mjs` + `paperclip/apply-mcp-tools.mjs`
-update grants both. Prompt template `builtin:mil-heartbeat-v3`
-updated to advertise both with explicit guidance ("use plural when
-delegating 2+ items at once"). Drive-by fix: `npm test` script now
+shared `buildPayload` helper to defend the 0.8.13 regression on
+every child of every batch. Allowlist gate: agents with
+`can_delegate` need both `create_sub_issue` and `create_sub_issues`
+in their `paperclipMcpTools` allowlist. Prompt template
+`builtin:mil-heartbeat-v3` updated to advertise both with explicit
+guidance ("use plural when delegating 2+ items at once"). Drive-by fix: `npm test` script now
 quotes the `'dist/**/*.test.js'` glob so node's native glob
 expansion picks up three-level-deep test files (was relying on `sh`
 globstar which is off by default — silently skipped 54 tests
@@ -520,13 +512,13 @@ doesn't exist exactly — typo, stale name, or a brand-new tool the
 worker isn't authorised for — Hermes silently rewrites the call
 to the closest-matching registered tool, prints a single
 `🔧 Auto-repaired tool name: 'X' -> 'Y'` line, and dispatches the
-rewritten call. We caught this in production on the 0.8.16-mil.0
-smoke test: a non-delegator worker calling
-`mcp_paperclip_create_sub_issues` (a tool only delegators have on
-their allowlist) was silently mapped to `mcp_paperclip_get_issue`
-— the call "succeeded", returned garbage from the worker's POV,
-and the actual decomposition the LLM intended never happened. No
-alarm, no failed run, no telemetry — pure silent breakage. The
+rewritten call. We caught this on the 0.8.16-mil.0 smoke test:
+a non-delegator worker calling `mcp_paperclip_create_sub_issues`
+(a tool only delegators have on their allowlist) was silently
+mapped to `mcp_paperclip_get_issue` — the call "succeeded",
+returned garbage from the worker's POV, and the actual
+decomposition the LLM intended never happened. No alarm, no
+failed run, no telemetry — pure silent breakage. The
 new detector watches the Hermes stream for the auto-repair
 signature line, extracts the original→repaired tool names, and
 (1) emits an `[hermes] ERROR: auto-repair: …` line on **stderr**
@@ -534,8 +526,8 @@ at the moment of detection so Paperclip's UI renders it in the
 red error track, and (2) classifies the rewrite against the
 agent's `paperclipMcpTools` allowlist — the alert message
 explicitly says either "ORIGINAL tool was NOT in the per-agent
-allowlist" (the high-signal failure case the production incident
-hit) or "original tool IS in the per-agent allowlist (likely
+allowlist" (the high-signal failure case the smoke test hit) or
+"original tool IS in the per-agent allowlist (likely
 typo or near-miss)" so the operator gets one-line triage. Every
 detection is also written to `result_json.autoRepairs[]` (with
 `original`, `repaired`, `unauthorized`, `ts`) plus the rollup
@@ -609,10 +601,10 @@ NousResearch PR #29).** Pre-0.8.18 `Object.assign(env, userEnv)`
 copied Paperclip's `{ type, value }` secret-ref wrappers verbatim,
 so spawned Hermes saw `ANTHROPIC_API_KEY=[object Object]` for any
 key set via `adapterConfig.env`. The bug was latent in our deploy
-because every key that matters is set via the ECS task-definition
-env (container-level), not through Paperclip's per-agent secret
-refs — but the next operator who reaches for the "Secrets" tab to
-inject a one-off API key would have hit it. Replaced with the
+because every key that matters is set via container-level env, not
+through Paperclip's per-agent secret refs — but the next operator
+who reaches for the "Secrets" tab to inject a one-off API key
+would have hit it. Replaced with the
 canonical iteration that handles plain strings, `{ value }`
 wrappers (with or without `type`), and silently-but-loudly drops
 anything weird (a single `[hermes] WARN: dropped N
@@ -673,7 +665,7 @@ unknown names are ignored (so prose like
 Verified against the literal v2026.428.0 wrapper, multi-layer
 prepends, CRLF line endings, and trimmed-name lookup. Without this
 fix, bumping `paperclip:latest` to v2026.428.0 would silently break
-all 39 MIL agents. Pure defense — no wire-format, prompt-template,
+every deployed agent. Pure defense — no wire-format, prompt-template,
 or run-behaviour change for currently-deployed agents (Path A
 returns identical bytes to pre-0.8.19 for any clean bare
 `builtin:<name>` input). 14 new unit tests in
@@ -749,44 +741,35 @@ support and optional `title` / `summary` / `continuationPolicy`
 fields land per the upstream payload contract. **The tool is
 registered in the global registry but NOT in any agent's default
 allowlist** — agents only get it when their `paperclipMcpTools`
-config includes the name explicitly. This is the BETA-API soak
-switch: a single Tier-2 pilot agent (LinkedIn Strategist) gets it
-in this release; the marker convention (`<!-- mode: test -->`,
-`RESULT: done`) continues to work unchanged for the other 38
-agents until `0.9.0-mil.0` flips the fleet to v4 prompts and
-retires markers. Per-tool error classification: 4xx (validation /
-bad payload shape) → `retryPolicy=fix-args` and the upstream zod
-issue body is forwarded verbatim into the tool result text so the
-LLM can read which `payload.<field>` failed; 5xx and bare network
-errors → `retryPolicy=retry`; 401 / 403 → `retryPolicy=abort`
-(auth is wired by the adapter, not something the LLM can fix).
-22 new unit tests in `post-issue-interaction.test.ts` (happy-path
-round-trips for each kind, optional-field threading,
-`sourceRunId` injection from `PAPERCLIP_RUN_ID`, scope-violation
-rejection, full HTTP-status classification matrix). Total adapter
-test count: 360 → 372. Wire-format additive only — pre-0.8.21
-agents continue to operate exclusively through `post_issue_comment`
-+ RESULT markers. PR 3 of the adapter-0.9 phased rollout; PR 4
-(`0.9.0-mil.0`) will ship `mil-heartbeat-v4`, flip all 39 agents,
-and retire markers — gated on a 1-week LinkedIn Strategist pilot
-proving the BETA `IssueInteraction` API behaves correctly in
-production.
+config includes the name explicitly, so consumers can soak the
+new BETA surface on a single pilot agent before fleet-wide rollout.
+Per-tool error classification: 4xx (validation / bad payload
+shape) → `retryPolicy=fix-args` and the upstream zod issue body
+is forwarded verbatim into the tool result text so the LLM can
+read which `payload.<field>` failed; 5xx and bare network errors
+→ `retryPolicy=retry`; 401 / 403 → `retryPolicy=abort` (auth is
+wired by the adapter, not something the LLM can fix). 22 new unit
+tests in `post-issue-interaction.test.ts` (happy-path round-trips
+for each kind, optional-field threading, `sourceRunId` injection
+from `PAPERCLIP_RUN_ID`, scope-violation rejection, full HTTP-
+status classification matrix). Total adapter test count: 360 →
+372. Wire-format additive only — pre-0.8.21 agents continue to
+operate exclusively through `post_issue_comment` + RESULT markers.
+Companion to `0.9.0-mil.0`, which ships `mil-heartbeat-v4` (the
+prompt template that teaches agents how to use this tool).
 
-**0.9.0-mil.0 — DRAFT (gated on Gate A pilot soak): new builtin
-template `mil-heartbeat-v4`** (`templates/mil-heartbeat-v4.md`).
-Same adapter-owned status semantics and same in-process
-`paperclip-mcp` tool server as `mil-heartbeat-v3`, but additionally:
-(a) retires the `RESULT:` marker from the prompt surface — the
-parser still honours it as a server-side fallback for any v3-pinned
-agent during the v3→v4 rollout window, but v4 agents are no longer
-taught it, so the LLM is funnelled toward
-`mcp_paperclip_update_issue_status` as the canonical completion
-signal; (b) documents the BETA `mcp_paperclip_post_issue_interaction`
-tool with a worked example for each of the three currently-shipping
-kinds (`request_confirmation` for single yes/no decisions like
-publish-vs-hold approvals, `suggest_tasks` for delegator
-decompositions that benefit from operator review before fan-out,
-`ask_user_questions` for specific blocking clarifications);
+**0.9.0-mil.0 — new builtin template `mil-heartbeat-v4`**
+(`templates/mil-heartbeat-v4.md`). Same adapter-owned status
+semantics and same in-process `paperclip-mcp` tool server as
+`mil-heartbeat-v3`, but additionally: (a) retires the `RESULT:`
+marker from the prompt surface — the parser still honours it as a
+server-side fallback for any v3-pinned agent during the v3→v4
+rollout window, but v4 agents are no longer taught it, so the LLM
+is funnelled toward `mcp_paperclip_update_issue_status` as the
+canonical completion signal; (b) documents the BETA
+`mcp_paperclip_post_issue_interaction` tool with a worked example
+for each of the three currently-shipping kinds
+(`request_confirmation`, `suggest_tasks`, `ask_user_questions`);
 (c) explicitly documents when NOT to use `post_issue_interaction`
 (in-run progress, internal coordination, logging) so the LLM
 doesn't over-use the new surface and turn every comment into a
@@ -795,19 +778,13 @@ structured card. `mil-heartbeat-v4` is registered in
 `MCP_TOOL_TEMPLATES` in `src/shared/constants.ts` — opts the new
 template into adapter-owned status transitions AND the per-run
 `paperclip-mcp` tool server alongside v3. Both v3 and v4 are
-supported indefinitely so the MIL repo can flip agents one at a
-time and roll back individually if a prompt regression surfaces
-(no adapter-side rollback needed). New unit test in
+supported indefinitely so consumers can flip agents one at a time
+and roll back individually if a prompt regression surfaces (no
+adapter-side rollback needed). New unit test in
 `resolve-prompt-template.test.ts` resolves `builtin:mil-heartbeat-v4`,
 asserts each documented `IssueInteraction` kind appears in the
 rendered template, and asserts the marker has been retired from
-the prompt surface (catches a regression where someone accidentally
-ships v3 content under the v4 name). Total adapter test count:
-372 → 373. **Adapter-side scaffolding only** — the 39-agent fleet
-flip + Dockerfile alias bump + promotion of `post_issue_interaction`
-from per-agent override to fleet-wide allowlist all live on the
-MIL-repo side and ship in a separate PR that's gated on the
-LinkedIn Strategist pilot's day-7 verification.
+the prompt surface. Total adapter test count: 372 → 373.
 
 ## MIL-specific features
 
@@ -845,11 +822,11 @@ Features you get in this fork that upstream doesn't ship:
   `errorMessage` on strong failure signatures, not substring matches.
 - **Run-context resolution** (0.4.2+) — per-run fields resolved from
   `ctx.context` (the modern Paperclip shape) with `ctx.config` fallback.
-- **Runtime hot-patch deploy path** — MarketIntelLabs' infra ships a
+- **Runtime hot-patch deploy path** — the maintainer's infra ships a
   `scripts/upgrade-adapter.sh` that overlays a new adapter tarball onto
-  running ECS tasks without a Docker rebuild, cutting deploy time from
-  20-40 min to ~3 min. Requires the companion `ops-entrypoint.sh` hook
-  shipped in the [`marketintellabs`](https://github.com/marketintellabs/marketintellabs) infra repo.
+  running containers without a full image rebuild, cutting deploy time
+  significantly. Requires a companion entrypoint hook on the consumer
+  side.
 - **Release workflow** — `.github/workflows/release.yml` publishes to
   npm on every `v*` tag push.
 
@@ -1016,11 +993,11 @@ Two ways to flip the adapter into test mode (both produce the same overrides —
 
 The adapter probes each spawn's task title + body and routes that one issue's work tree to the free model. Sub-issues created via `create_sub_issue` (or `create_sub_issues` for bulk delegation, 0.8.16+) while in this mode automatically inherit the marker, so the whole delegation tree stays free until it terminates.
 
-CEO prompt that reliably trips the override:
+An operator prompt that reliably trips the override:
 
 > *Run a smoketest of the system in low-cost validation mode. Validate pipeline integrity end-to-end (wake-on-assign, MCP tool calls, status reconciliation, sub-agent delegation). Don't worry about output quality — free models are inconsistent under tool-use load.*
 
-**2. Process-wide env vars (operator big-hammer, incident response).** Set on the adapter process / ECS task definition. Apply to every spawn while present, regardless of per-agent `adapterConfig` or issue contents. See the 0.8.10 entry above for full semantics.
+**2. Process-wide env vars (operator big-hammer, incident response).** Set on the adapter process. Apply to every spawn while present, regardless of per-agent `adapterConfig` or issue contents. See the 0.8.10 entry above for full semantics.
 
 | Env var | Default | Description |
 |---------|---------|-------------|
