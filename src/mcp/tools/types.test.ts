@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import {
   classifyHttp,
   errorResult,
+  ERROR_PREFIXES,
   okResult,
   ScopeViolation,
 } from "./types.js";
@@ -90,6 +91,52 @@ describe("errorResult", () => {
     assert.ok(r.text.includes("bad args"));
     assert.ok(r.text.includes("[retryPolicy=fix-args]"));
     assert.ok(r.text.includes('"field": "issueId"'));
+  });
+
+  // ─── Anti-hallucination prefix vocabulary (0.9.3+) ──────────────────
+  // The leading [ARGS REJECTED — MCP server is healthy; ...] / [TRANSIENT
+  // FAILURE — ...] / [NON-RECOVERABLE — ...] tags pre-empt the
+  // unreachable-server hallucination observed in the 2026-05-03 LinkedIn
+  // Strategist run-4c6fc85b post-mortem. Every tool error must lead with
+  // its policy-keyed prefix; the SDK-validation interception in
+  // server.ts uses the same vocabulary so the LLM sees one consistent
+  // shape across all failure modes.
+
+  it("fix-args result LEADS WITH the ARGS REJECTED prefix (anti-hallucination)", () => {
+    const r = errorResult("scope violation", "fix-args");
+    assert.ok(
+      r.text.startsWith(ERROR_PREFIXES["fix-args"]),
+      "fix-args text must lead with the ARGS REJECTED prefix so the LLM cannot misread it as a network failure",
+    );
+    // The 'MCP server is healthy' anchor is the load-bearing phrase —
+    // pre-empts the unreachable-server hallucination.
+    assert.match(r.text, /MCP server is healthy/);
+  });
+
+  it("retry result LEADS WITH the TRANSIENT FAILURE prefix", () => {
+    const r = errorResult("rate limited", "retry");
+    assert.ok(r.text.startsWith(ERROR_PREFIXES.retry));
+    assert.match(r.text, /TRANSIENT FAILURE/);
+  });
+
+  it("abort result LEADS WITH the NON-RECOVERABLE prefix", () => {
+    const r = errorResult("auth failed");
+    assert.ok(r.text.startsWith(ERROR_PREFIXES.abort));
+    assert.match(r.text, /NON-RECOVERABLE/);
+    assert.match(r.text, /Do NOT retry/);
+  });
+
+  it("prefixes are exhaustive — one per retryPolicy value", () => {
+    // Defensive: if a new retryPolicy is added to the union without a
+    // prefix entry, this catches it before production sees an undefined
+    // prefix concatenated into the error text.
+    const policies: Array<"fix-args" | "retry" | "abort"> = ["fix-args", "retry", "abort"];
+    for (const p of policies) {
+      assert.ok(
+        ERROR_PREFIXES[p] && ERROR_PREFIXES[p].startsWith("["),
+        `missing or malformed prefix for retryPolicy=${p}`,
+      );
+    }
   });
 });
 

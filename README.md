@@ -806,6 +806,21 @@ mutated" wake would replay an old run and silently re-promote a
 cancelled issue back to working state. Cost: one extra GET per
 status-update call. 9 new tests, total 391 → 401.
 
+**0.9.3-mil.0 — anti-hallucination error-classification clarity
+on the MCP tool plane.** Every tool error now leads with one of
+three policy-keyed prefixes — `[ARGS REJECTED — MCP server is
+healthy; …]`, `[TRANSIENT FAILURE — …]`, or `[NON-RECOVERABLE —
+…]` — so an LLM cannot misread an args-rejection as a network
+failure. The same prefix is applied to MCP-SDK-level zod
+validation rejections (which previously bypassed the adapter's
+`errorResult` formatter entirely) via a `tools/call` request-
+handler wrapper that detects the SDK's `Invalid arguments for
+tool …` shape. Motivated by an observed agent run that collapsed
+three consecutive schema-validation failures into "the MCP server
+appears unreachable" despite a healthy server. +8 new tests.
+(Lands as a stand-alone improvement; safe with or without the
+0.9.2 terminal-state guard.)
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:

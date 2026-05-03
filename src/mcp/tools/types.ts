@@ -78,14 +78,49 @@ export function okResult(payload: unknown): ToolResult {
   return { text: stringify(payload) };
 }
 
+/**
+ * Leading anti-hallucination tag for tool errors, keyed by retryPolicy.
+ *
+ * Why: the 2026-05-03 LinkedIn Strategist run-4c6fc85b post-mortem found
+ * that an agent receiving three consecutive `post_issue_interaction`
+ * fix-args errors collapsed the failures into a hallucinated diagnosis
+ * — "the MCP server appears unreachable" — even though every error
+ * response carried `[retryPolicy=fix-args]` and a clear schema-rejection
+ * message. The LLM's NLU pattern-matched on the bare word "error" and
+ * cached the wrong frame for the rest of the run.
+ *
+ * The cure is a leading semantic tag that an LLM cannot misread:
+ *   `fix-args` → MCP-server-is-healthy, args-are-wrong
+ *   `retry`    → transient, momentary unavailability, just retry
+ *   `abort`    → non-recoverable, do NOT keep retrying the same call
+ *
+ * The explicit "MCP server is healthy" anchor on `fix-args` is the
+ * load-bearing phrase: it pre-empts the unreachable-server hallucination
+ * by stating the contrary frame directly in the error body.
+ *
+ * Exported so the server.ts SDK-validation interception path uses the
+ * same vocabulary as the in-tool error paths — no LLM should ever see
+ * two error shapes for the same semantic class.
+ */
+export const ERROR_PREFIXES = {
+  "fix-args":
+    "[ARGS REJECTED — MCP server is healthy; your call arguments did not match the tool's schema. Read the message below, fix the offending field, and retry the same tool. Do NOT conclude the server is unreachable.]",
+  retry:
+    "[TRANSIENT FAILURE — the call reached the server but a downstream resource was momentarily unavailable. Wait briefly and retry the same call.]",
+  abort:
+    "[NON-RECOVERABLE — auth failure, missing record, or quota exhaustion. Do NOT retry the same call. Document the failure via post_issue_comment if appropriate, then call update_issue_status with status=blocked.]",
+} as const;
+
 export function errorResult(
   message: string,
-  retryPolicy: ToolResult["retryPolicy"] = "abort",
+  retryPolicy: NonNullable<ToolResult["retryPolicy"]> = "abort",
   details?: unknown,
 ): ToolResult {
+  const prefix = ERROR_PREFIXES[retryPolicy];
+  const body = `${message} [retryPolicy=${retryPolicy}]`;
   const text = details === undefined
-    ? `${message} [retryPolicy=${retryPolicy}]`
-    : `${message} [retryPolicy=${retryPolicy}]\n${stringify(details)}`;
+    ? `${prefix}\n${body}`
+    : `${prefix}\n${body}\n${stringify(details)}`;
   return { text, isError: true, retryPolicy };
 }
 

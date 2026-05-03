@@ -310,6 +310,126 @@ describe("buildServer — audit log NDJSON sink", () => {
   });
 });
 
+// ─── SDK-validation interception (0.9.3+) ────────────────────────────
+// Background: the upstream MCP SDK validates tool input args against
+// the registered zod schema BEFORE invoking our per-tool execute()
+// callback. When validation fails the SDK throws an McpError that gets
+// converted into a CallToolResult with raw text "Input validation
+// error: Invalid arguments for tool X: <zod path>" — no
+// [retryPolicy=...] tag, no [ARGS REJECTED — MCP server is healthy]
+// prefix. The 2026-05-03 LinkedIn Strategist run-4c6fc85b post-mortem
+// found this gap caused agents to hallucinate "MCP server appears
+// unreachable" after consecutive args-rejection errors.
+//
+// The fix in server.ts (§installValidationErrorReformatter) re-sets
+// the SDK's tools/call request handler with a wrapper that detects the
+// validation-error shape in the SDK's return value and reformats it
+// with our standard prefix. These tests exercise the wrapper through
+// the SDK's actual request-dispatch path (not reachTool, which bypasses
+// the wrapper).
+
+type ToolsCallResult = {
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+};
+
+type ToolsCallRpcRequest = {
+  method: string;
+  params: { name: string; arguments?: unknown };
+};
+
+type RpcHandler = (
+  request: ToolsCallRpcRequest,
+  extra: { signal: AbortSignal },
+) => Promise<ToolsCallResult>;
+
+interface ServerInternals {
+  _requestHandlers: Map<string, RpcHandler>;
+}
+
+async function dispatchToolsCall(
+  server: { server: ServerInternals },
+  toolName: string,
+  args: unknown,
+): Promise<ToolsCallResult> {
+  const handler = server.server._requestHandlers.get("tools/call");
+  if (!handler) throw new Error("tools/call handler not installed");
+  return handler(
+    { method: "tools/call", params: { name: toolName, arguments: args } },
+    { signal: new AbortController().signal },
+  );
+}
+
+describe("buildServer — SDK-validation interception", () => {
+  it("reformats SDK validation rejections with the [ARGS REJECTED — MCP server is healthy] prefix", async () => {
+    const server = buildServer({ client: stubClient(), scopedIssueId: null });
+    // get_issue requires `issueId` (non-empty string). Send a request
+    // that fails the schema (issueId missing) — the SDK's
+    // validateToolInput throws InvalidParams before our execute() ever
+    // runs.
+    const res = await dispatchToolsCall(server as never, "get_issue", { wrong_field: "x" });
+
+    assert.equal(res.isError, true);
+    const text = res.content[0]?.text ?? "";
+    assert.match(text, /\[ARGS REJECTED/, "must lead with the ARGS REJECTED prefix");
+    assert.match(text, /MCP server is healthy/, "must include the anti-hallucination anchor");
+    assert.match(text, /\[retryPolicy=fix-args\]/, "must carry the fix-args retry policy");
+    assert.match(text, /get_issue/, "must name the offending tool");
+  });
+
+  it("does not reformat successful tool calls", async () => {
+    const server = buildServer({ client: stubClient(), scopedIssueId: null });
+    const res = await dispatchToolsCall(server as never, "get_issue", { issueId: "MAR-1" });
+    assert.equal(res.isError ?? false, false);
+    const text = res.content[0]?.text ?? "";
+    assert.ok(!text.includes("[ARGS REJECTED"), "successful calls must not get the prefix");
+  });
+
+  it("does not double-wrap in-tool errors that already carry a prefix", async () => {
+    // post_issue_comment with scope mismatch returns an in-tool
+    // errorResult(retryPolicy=fix-args) which already leads with the
+    // ARGS REJECTED prefix. The wrapper must detect that and pass it
+    // through unchanged — otherwise the LLM would see two prefixes
+    // glued together.
+    const server = buildServer({ client: stubClient(), scopedIssueId: "MAR-30" });
+    const res = await dispatchToolsCall(
+      server as never,
+      "post_issue_comment",
+      { issueId: "MAR-99", body: "wrong scope" },
+    );
+    assert.equal(res.isError, true);
+    const text = res.content[0]?.text ?? "";
+    // Exactly ONE leading prefix (the regex 'gm' counts occurrences).
+    const matches = text.match(/\[ARGS REJECTED/g) ?? [];
+    assert.equal(matches.length, 1, "must not double-wrap — found " + matches.length + " prefixes");
+    assert.match(text, /scope violation/);
+  });
+
+  it("logs tool_call_validation_rejected when the SDK rejects args", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "mcp-validation-test-"));
+    try {
+      const auditPath = join(dir, "calls.ndjson");
+      const server = buildServer({
+        client: stubClient(),
+        scopedIssueId: null,
+        auditLogPath: auditPath,
+      });
+      await dispatchToolsCall(server as never, "get_issue", {});
+
+      // Audit log only persists tool_call_end / tool_call_error today;
+      // tool_call_validation_rejected goes to stderr (writeLog always
+      // writes there). We confirm the dispatch did not also emit a
+      // tool_call_end (which would mean execute ran — it shouldn't on
+      // SDK validation failure).
+      const raw = await readFile(auditPath, "utf-8").catch(() => "");
+      const lines = raw.split("\n").filter(Boolean);
+      assert.equal(lines.length, 0, "execute must not have run on validation failure");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // Keep the import so the type-check pass catches any drift in the SDK's
 // zod peer-dep contract that could otherwise silently break tool schemas.
 void z;
