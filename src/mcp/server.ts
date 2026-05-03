@@ -1,9 +1,10 @@
 import { appendFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { createClient, type PaperclipClient } from "./client.js";
 import { ALL_TOOLS } from "./tools/index.js";
-import { ScopeViolation, type ToolContext } from "./tools/types.js";
+import { ERROR_PREFIXES, ScopeViolation, type ToolContext } from "./tools/types.js";
 import { ADAPTER_VERSION } from "../shared/version.js";
 
 const SERVER_NAME = "paperclip";
@@ -218,8 +219,9 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
               {
                 type: "text" as const,
                 text:
+                  `${ERROR_PREFIXES.abort}\n` +
                   `tool_call_limit_exceeded: this run has already made ${maxCalls} tool calls. ` +
-                  `Finish the work with the information you already have and emit your RESULT: marker. ` +
+                  `Finish the work with the information you already have and call update_issue_status to terminate. ` +
                   `[retryPolicy=abort]`,
               },
             ],
@@ -252,7 +254,9 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
             content: [
               {
                 type: "text" as const,
-                text: `internal tool error: ${message} [retryPolicy=retry]`,
+                text:
+                  `${ERROR_PREFIXES.retry}\n` +
+                  `internal tool error: ${message} [retryPolicy=retry]`,
               },
             ],
             isError: true,
@@ -262,7 +266,139 @@ export function buildServer(opts: BuildOptions = {}): McpServer {
     );
   }
 
+  // SDK-validation interception. Background:
+  //
+  // The upstream MCP SDK installs its own `tools/call` request handler
+  // when registerTool runs (see node_modules/@modelcontextprotocol/sdk
+  // /dist/esm/server/mcp.js §setToolRequestHandlers). That handler
+  // calls validateToolInput → safeParseAsync against the tool's
+  // inputSchema BEFORE invoking our per-tool execute() callback. When
+  // validation fails, the SDK throws `McpError(InvalidParams, "Input
+  // validation error: Invalid arguments for tool X: ...")` and converts
+  // it via createToolError into a CallToolResult with text equal to
+  // the raw error message — no `[retryPolicy=...]` tag, no `[ARGS
+  // REJECTED ...]` prefix, nothing the LLM can use to disambiguate
+  // a schema-rejection from a network failure.
+  //
+  // The 2026-05-03 LinkedIn Strategist (run 4c6fc85b) post-mortem found
+  // that this exact gap caused an agent to hallucinate "MCP server
+  // appears unreachable" after three consecutive args-validation
+  // rejections on `post_issue_interaction`. The server was healthy;
+  // the LLM just couldn't see that from the bare error text.
+  //
+  // Fix: re-set the `tools/call` handler AFTER registerTool has
+  // installed the SDK's auto-handler. setRequestHandler does a Map.set
+  // (per shared/protocol.js §setRequestHandler), so this cleanly
+  // replaces the previous handler. We delegate to the SDK-installed
+  // handler for the actual work, then post-process its return value
+  // to detect the validation-error shape and reformat with our
+  // standard prefix vocabulary. Successful tool calls and tool-emitted
+  // errorResult() responses pass through unchanged.
+  //
+  // Why post-process the SDK's return rather than re-implementing the
+  // whole call flow: the SDK owns task-support routing, output-schema
+  // validation, capability checks, and the disabled-tool path. We want
+  // our hands off all of that. The validation-error shape is stable
+  // (`isError: true`, single text content beginning with "Input
+  // validation error:" or "Invalid arguments for tool"), so detection
+  // is reliable.
+  installValidationErrorReformatter(server, writeLog);
+
   return server;
+}
+
+/**
+ * Pattern that identifies a CallToolResult emitted by the SDK's
+ * built-in `validateToolInput` failure path.
+ *
+ * Observed SDK shapes (across versions):
+ *   "Invalid arguments for tool X: <zod path>"
+ *   "Input validation error: Invalid arguments for tool X: <zod path>"
+ *   "MCP error -32602: Input validation error: Invalid arguments for tool X: <zod path>"
+ *
+ * The McpError class formats `.message` as `MCP error <code>: <text>`,
+ * and the SDK forwards that verbatim into createToolError. So the
+ * outermost prefix is always `MCP error -32602:` (InvalidParams = -32602
+ * per JSON-RPC 2.0). Detection is permissive: we look for "Invalid
+ * arguments for tool" anywhere in the text and capture the tool name
+ * + zod detail. The `s` flag makes `.` cross newlines (zod errors are
+ * multi-line JSON when multiple fields fail).
+ */
+const SDK_VALIDATION_ERROR_PATTERN =
+  /Invalid arguments for tool ([^:]+):\s*(.*)/s;
+
+/**
+ * Replace the SDK-installed `tools/call` handler with a thin wrapper
+ * that delegates to the original and reformats validation errors so
+ * the LLM sees the same `[ARGS REJECTED — MCP server is healthy; ...]`
+ * prefix that in-tool errorResult() emits. Idempotent across SDK
+ * versions; if the SDK's error shape ever changes, the regex misses,
+ * the response passes through unchanged, and the worst case is we
+ * regress to the pre-0.9.3 untagged shape (which is what the LLM gets
+ * today on every other adapter version).
+ */
+function installValidationErrorReformatter(
+  server: McpServer,
+  writeLog: (event: string, meta: Record<string, unknown>) => void,
+): void {
+  // McpServer wraps a low-level Server as `.server`; that's where the
+  // CallToolRequestSchema handler lives. Both classes are public API
+  // (per the SDK docs), so this is supported usage rather than
+  // private-internals access.
+  const lowLevel = server.server;
+  const sdkHandler = lowLevel["_requestHandlers"].get("tools/call");
+  if (!sdkHandler) {
+    process.stderr.write(
+      "[paperclip-mcp] WARN: SDK tools/call handler not found; validation-error reformatter not installed\n",
+    );
+    return;
+  }
+
+  lowLevel.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    const result = await sdkHandler(request, extra);
+
+    // Successful results, or non-text errors, pass through.
+    if (!result || typeof result !== "object") return result;
+    const r = result as {
+      isError?: boolean;
+      content?: Array<{ type?: string; text?: string }>;
+    };
+    if (!r.isError || !r.content || r.content.length === 0) return result;
+    const first = r.content[0];
+    if (first?.type !== "text" || typeof first.text !== "string") return result;
+
+    // Already prefixed (in-tool errorResult or our own limit-exceeded
+    // path) — don't double-wrap.
+    if (
+      first.text.startsWith(ERROR_PREFIXES["fix-args"]) ||
+      first.text.startsWith(ERROR_PREFIXES.retry) ||
+      first.text.startsWith(ERROR_PREFIXES.abort)
+    ) {
+      return result;
+    }
+
+    const match = SDK_VALIDATION_ERROR_PATTERN.exec(first.text);
+    if (!match) return result;
+
+    const [, toolName, detail] = match;
+    writeLog("tool_call_validation_rejected", {
+      tool: toolName,
+      detail: detail.slice(0, 240),
+    });
+
+    return {
+      isError: true,
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `${ERROR_PREFIXES["fix-args"]}\n` +
+            `${toolName}: SDK schema validation rejected your arguments. ${detail.trim()} ` +
+            `[retryPolicy=fix-args]`,
+        },
+      ],
+    };
+  });
 }
 
 /**

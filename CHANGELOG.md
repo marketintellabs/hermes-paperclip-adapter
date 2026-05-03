@@ -4,6 +4,23 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.9.3-mil.0] — 2026-05-03
+
+### Fixed
+- **Anti-hallucination clarity on tool-error classification.** Every tool error now leads with one of three policy-keyed prefixes: `[ARGS REJECTED — MCP server is healthy; your call arguments did not match the tool's schema. Read the message below, fix the offending field, and retry the same tool. Do NOT conclude the server is unreachable.]` for `fix-args`; `[TRANSIENT FAILURE — …]` for `retry`; `[NON-RECOVERABLE — …]` for `abort`. The "MCP server is healthy" anchor on `fix-args` is the load-bearing phrase — pre-empts the unreachable-server hallucination by stating the contrary frame inside the error body the LLM reads. Same vocabulary in every error path: `errorResult()` (used by all tools), the in-handler tool-call-limit-exceeded path, the in-handler internal-error catch, and the new SDK-validation interceptor below.
+- **MCP-SDK-level zod validation rejections now also flow through the prefix.** Previously these bypassed `errorResult()` entirely — the SDK's `validateToolInput` throws an `McpError(InvalidParams)` BEFORE the per-tool execute() runs, and the SDK converts it via `createToolError` into a raw `Invalid arguments for tool …` result with no `[retryPolicy=…]` tag and no prefix. New `installValidationErrorReformatter` in `src/mcp/server.ts` re-sets the SDK's `tools/call` request handler with a wrapper that delegates to the SDK's logic and post-processes its return value: when the result text matches the `Invalid arguments for tool …` shape, the wrapper reformats it with the `fix-args` prefix and a `[retryPolicy=fix-args]` tag, and emits a `tool_call_validation_rejected` log event. Already-prefixed in-tool errors are detected by their leading bracket and pass through unchanged (no double-wrapping).
+
+### Notes
+- **No wire-format breakage.** Every error response keeps its `isError: true` and its trailing `[retryPolicy=…]` tag — substring-based downstream parsers continue to work. The prefix is additive context.
+- **Motivated by an observed run-time hallucination.** The 2026-05-03 post-mortem of an agent run found three consecutive `post_issue_interaction` schema-validation rejections being collapsed into a single hallucinated diagnosis ("the MCP server appears unreachable") despite the server reporting `healthy` and durations consistent with an in-process zod rejection. The classification was correct (these were args-validation failures the LLM should have retried with corrected args) but the error text was indistinguishable from a network failure to the LLM's NLU. The leading `[ARGS REJECTED — MCP server is healthy …]` anchor closes that gap.
+
+## [0.9.2-mil.0] — 2026-05-03
+
+### Fixed
+- **Terminal-state guard on `update_issue_status`.** The tool now reads the issue's current status before issuing the PATCH and refuses to transition out of `cancelled` or `done`. An idempotent re-assert (e.g. `done` → `done`) is allowed and short-circuits to the PATCH. The error result returns `retryPolicy=abort` with a clear message instructing the agent to look for new work via `list_my_issues`. If the precheck read itself fails the guard logs and falls through, so a transient backend hiccup never blocks a legitimate transition.
+- **9 new unit tests** in `update-issue-status.test.ts` covering the guard's positive and negative paths plus the precheck-read-failure fallthrough; existing `tools.test.ts` cases updated to stub the new GET.
+
+### Notes
 ## [0.9.2-mil.0] — 2026-05-03
 
 ### Fixed
