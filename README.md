@@ -821,6 +821,24 @@ appears unreachable" despite a healthy server. +8 new tests.
 (Lands as a stand-alone improvement; safe with or without the
 0.9.2 terminal-state guard.)
 
+**0.9.4-mil.0 — release-hygiene fix: `ADAPTER_VERSION` ↔
+`package.json` drift.** The runtime version constant in
+`src/shared/version.ts` (the source for `result_json.adapterVersion`,
+the MCP banner, and `runHealthCheck()`) was last bumped in
+0.9.1-mil.0 and silently shipped untouched in both 0.9.2 and 0.9.3.
+The published packages, the deployed images, and the new behaviour
+(terminal-state guard + anti-hallucination prefixes) were all
+correct — but every fleet run was reporting `adapterVersion:
+"0.9.1-mil.0"` for ~12 hours and operational tooling like
+`bake-spotcheck.mjs` would have permanently flagged the fleet as
+stuck on the old adapter. 0.9.4 bumps the constant AND adds a
+test guard (`src/shared/version.test.ts`) that asserts the
+constant matches `package.json` on every CI run, plus a release-
+workflow step that asserts the git tag matches `package.json`
+before publish. The version.ts docstring already claimed "the
+release workflow checks this at publish time" — that claim is
+now true.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
