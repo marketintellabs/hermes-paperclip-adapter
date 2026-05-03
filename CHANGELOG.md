@@ -4,16 +4,24 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
-## [0.9.1-mil.0] — UNRELEASED
+## [0.9.2-mil.0] — 2026-05-03
 
-### Added
-- **Structured classification of LLM-provider failure modes — promotes them from raw text in `result_json.result` to first-class telemetry.** New `src/server/llm-error-classifier.ts` inspects each run's final-message text (and `executionResult.errorMessage` as a secondary source) for known LLM-API failure signatures and emits a stable `errorCode` plus an operator-actionable hint. Patterns covered: **HTTP 402** budget / credit exhaustion → `provider_budget_exhausted`; **HTTP 401 / 403** auth → `provider_auth_failed`; **HTTP 429** rate-limit → `provider_rate_limited` (NOT marked dead — the next wake may succeed); **"failed after N retries"** generic fallback → `llm_call_exhausted_retries`. Provider name is text-derived first (URL signatures: `openrouter.ai`, `api.anthropic.com`, `api.openai.com`, `api.deepinfra.com`/`huggingface.co`) with the adapter's `resolvedProvider` as a fallback so the hint stays accurate even when Hermes routes through a meta-router.
-- **Wire-up in `src/server/execute.ts`** between auto-repair detection and the existing `liveness.recordBeat("run_end")` finalization. When a classification fires, the adapter sets `resultJson.errorCode`, sets `resultJson.errorEvidence` (capped 240 chars — operator-readable quote of the matched substring), calls `liveness.recordHint(hint)` so the actionable next step lands in `result_json.nextActionHints[]`, and (only for the budget / auth / exhausted-retries cases that definitively kill the run) calls `liveness.markDead(errorCode)`. `provider_rate_limited` calls `markStalled()` because the next wake may legitimately succeed. A single `[hermes] LLM-API failure classified: <code> ...` stderr line is emitted at classification time for grep-friendly log analysis.
-- **18 new unit tests** in `llm-error-classifier.test.ts` covering the documented error patterns, provider detection from URL signatures and caller-supplied fallback, the alternate budget-exhaustion phrasing without HTTP 402 in the same line, HTTP 401/403 auth (with provider-aware env-var hint), `invalid_api_key` JSON body without a status code, HTTP 429 with `dead=false` semantics + alternate phrasings, the generic "failed after N retries" fallback, the precedence test (a blob containing both "failed after N retries" AND "HTTP 402" must classify as `provider_budget_exhausted`, not the generic fallback), null/empty/non-string defensive handling, clean response → null, MCP-tool-error JSON body → null, and the 240-char evidence cap. Total adapter test count: 373 → 391.
+### Fixed
+- **Terminal-state guard on `update_issue_status`.** The tool now reads the issue's current status before issuing the PATCH and refuses to transition out of `cancelled` or `done`. An idempotent re-assert (e.g. `done` → `done`) is allowed and short-circuits to the PATCH. The error result returns `retryPolicy=abort` with a clear message instructing the agent to look for new work via `list_my_issues`. If the precheck read itself fails the guard logs and falls through, so a transient backend hiccup never blocks a legitimate transition.
+- **9 new unit tests** in `update-issue-status.test.ts` covering the guard's positive and negative paths plus the precheck-read-failure fallthrough; existing `tools.test.ts` cases updated to stub the new GET. Total adapter test count: 391 → 401.
 
 ### Notes
-- **Pure additive — no behaviour change for runs that aren't already failing.** Successful runs return `null` from the classifier and proceed exactly as before. Even for failing runs, the classification only enriches `result_json` (errorCode + errorEvidence + an extra entry in nextActionHints) and emits one stderr line — the run's success/failure status, return value, and downstream reconciliation are all unchanged.
-- **Surfaces a class of failure that previously bled into `result_json.result` as raw text.** After this release, structured `errorCode` + `nextActionHints[]` make it possible for dashboards to filter / aggregate / alert on provider-side failure shapes without parsing prose.
+- **Defense-in-depth, not a behaviour change for healthy runs.** Normal transitions (`in_progress` → `done`, `in_progress` → `blocked`, `in_progress` → `needs_review`) cost one extra GET (~50–150ms once at run end) and behave identically.
+
+## [0.9.1-mil.0] — 2026-05-02
+
+### Added
+- **Structured classification of provider failure modes** in `result_json`. New `src/server/llm-error-classifier.ts` inspects each run's final-message text and emits a stable `errorCode` plus an operator-actionable hint: HTTP 402 → `provider_budget_exhausted`; 401/403 → `provider_auth_failed`; 429 → `provider_rate_limited`; generic "failed after N retries" → `llm_call_exhausted_retries`. Provider is detected from URL signatures with a config fallback.
+- **Wired into `src/server/execute.ts`** so a classification sets `errorCode`/`errorEvidence`, records an actionable hint, and marks the run dead or stalled appropriately.
+- **18 new unit tests**. Total adapter test count: 373 → 391.
+
+### Notes
+- **Pure additive.** Successful runs return `null` from the classifier and proceed exactly as before.
 
 ## [0.9.0-mil.0] — 2026-05-02
 

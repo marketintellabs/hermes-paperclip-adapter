@@ -545,9 +545,14 @@ describe("create_sub_issue", () => {
 
 describe("update_issue_status", () => {
   it("happy path: PATCHes /issues/{id} with { status } and returns ok", async () => {
+    // Precheck GET runs before every transition (terminal-state guard).
+    // Tests that exercise the legitimate write path must stub both.
     const { client, calls } = fakeClient(
       {},
-      { "PATCH /issues/MAR-30": { id: "MAR-30", status: "done" } },
+      {
+        "GET /issues/MAR-30": { id: "MAR-30", status: "in_progress" },
+        "PATCH /issues/MAR-30": { id: "MAR-30", status: "done" },
+      },
     );
     const { ctx } = fakeCtx(client, "MAR-30");
     const result = await updateIssueStatusTool.execute(
@@ -555,16 +560,20 @@ describe("update_issue_status", () => {
       ctx,
     );
     assert.equal(result.isError, undefined);
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].method, "PATCH");
-    assert.equal(calls[0].path, "/issues/MAR-30");
-    assert.deepEqual(calls[0].body, { status: "done" });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].method, "GET");
+    assert.equal(calls[1].method, "PATCH");
+    assert.equal(calls[1].path, "/issues/MAR-30");
+    assert.deepEqual(calls[1].body, { status: "done" });
   });
 
   it("passes statusReason through when reason is provided", async () => {
     const { client, calls } = fakeClient(
       {},
-      { "PATCH /issues/MAR-30": { id: "MAR-30", status: "needs_review" } },
+      {
+        "GET /issues/MAR-30": { id: "MAR-30", status: "in_progress" },
+        "PATCH /issues/MAR-30": { id: "MAR-30", status: "needs_review" },
+      },
     );
     const { ctx } = fakeCtx(client, "MAR-30");
     const result = await updateIssueStatusTool.execute(
@@ -572,7 +581,7 @@ describe("update_issue_status", () => {
       ctx,
     );
     assert.equal(result.isError, undefined);
-    const body = calls[0].body as Record<string, unknown>;
+    const body = calls[1].body as Record<string, unknown>;
     assert.equal(body.status, "needs_review");
     assert.equal(body.statusReason, "editor sign-off required");
   });
@@ -623,6 +632,7 @@ describe("update_issue_status", () => {
     const { client } = fakeClient(
       {},
       {
+        "GET /issues/MAR-30": { id: "MAR-30", status: "in_progress" },
         "PATCH /issues/MAR-30": new PaperclipClientError(
           "PATCH",
           "/issues/MAR-30",
@@ -641,9 +651,19 @@ describe("update_issue_status", () => {
   });
 
   it("404 from API → retryPolicy=fix-args (wrong id)", async () => {
+    // Both GET and PATCH 404 here — the terminal-state guard's GET
+    // precheck swallows the read failure (logs it, falls through), so
+    // the PATCH still runs and surfaces the 404 with its own policy.
     const { client } = fakeClient(
       {},
       {
+        "GET /issues/MAR-30": new PaperclipClientError(
+          "GET",
+          "/issues/MAR-30",
+          404,
+          null,
+          "not found",
+        ),
         "PATCH /issues/MAR-30": new PaperclipClientError(
           "PATCH",
           "/issues/MAR-30",
@@ -664,7 +684,10 @@ describe("update_issue_status", () => {
   it("scope-open runs (heartbeat) can transition any issue", async () => {
     const { client, calls } = fakeClient(
       {},
-      { "PATCH /issues/MAR-17": { id: "MAR-17", status: "done" } },
+      {
+        "GET /issues/MAR-17": { id: "MAR-17", status: "in_progress" },
+        "PATCH /issues/MAR-17": { id: "MAR-17", status: "done" },
+      },
     );
     const { ctx } = fakeCtx(client, null);
     const result = await updateIssueStatusTool.execute(
@@ -672,6 +695,8 @@ describe("update_issue_status", () => {
       ctx,
     );
     assert.equal(result.isError, undefined);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0].method, "GET");
+    assert.equal(calls[1].method, "PATCH");
   });
 });

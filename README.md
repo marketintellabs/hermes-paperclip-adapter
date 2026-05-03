@@ -786,33 +786,25 @@ asserts each documented `IssueInteraction` kind appears in the
 rendered template, and asserts the marker has been retired from
 the prompt surface. Total adapter test count: 372 → 373.
 
-**0.9.1-mil.0 — UNRELEASED: LLM-API failure classifier — promotes
-provider failure modes from raw `result_json.result` text to
-first-class `errorCode` + `nextActionHints[]` telemetry.** New
-`src/server/llm-error-classifier.ts` inspects each run's final-
-message text for known LLM-provider failure signatures and emits
-a stable errorCode + an operator-actionable one-liner. Patterns
-covered: HTTP 402 budget / credit exhaustion →
-`provider_budget_exhausted`; HTTP 401 / 403 auth →
-`provider_auth_failed`; HTTP 429 rate-limit →
-`provider_rate_limited` (NOT marked dead — the next wake may
-succeed); "failed after N retries" generic fallback →
-`llm_call_exhausted_retries`. Provider name is text-derived first
-(URL signatures: openrouter.ai / api.anthropic.com /
-api.openai.com / api.deepinfra.com|huggingface.co) with the
-adapter's `resolvedProvider` as the fallback so the hint stays
-accurate even when Hermes routes through a meta-router. Wire-up
-in `execute.ts` between auto-repair detection and the existing
-liveness finalization: sets `resultJson.errorCode`, sets
-`resultJson.errorEvidence` (capped 240 chars — operator-readable
-quote of the matched substring), calls
-`liveness.recordHint(hint)` so the actionable next step lands in
-`result_json.nextActionHints[]`, and (only for the budget / auth /
-exhausted-retries cases that definitively kill the run) calls
-`liveness.markDead(errorCode)`. 18 new unit tests in
-`llm-error-classifier.test.ts`. Total adapter test count: 373 →
-391. Pure additive — no behaviour change for runs that aren't
-already failing.
+**0.9.1-mil.0 — provider-failure classification.** New
+`src/server/llm-error-classifier.ts` emits a stable `errorCode` +
+operator-actionable hint for the common LLM-provider failure
+shapes (402 budget, 401/403 auth, 429 rate-limit, generic
+"failed after N retries"). Wire-up in `execute.ts` sets
+`resultJson.errorCode` / `errorEvidence`, records a hint in
+`nextActionHints[]`, and marks the run dead/stalled appropriately.
+Pure additive: 18 new tests, total 373 → 391, no behaviour change
+on healthy runs.
+
+**0.9.2-mil.0 — terminal-state guard on `update_issue_status`.**
+The tool now reads the issue's current status before the PATCH and
+refuses transitions out of `cancelled` / `done` (idempotent
+re-asserts still allowed). Returns `retryPolicy=abort` with a
+clear message pointing the agent at `list_my_issues`. Guards
+against a wake-loop pattern where a post-cancellation "issue
+mutated" wake would replay an old run and silently re-promote a
+cancelled issue back to working state. Cost: one extra GET per
+status-update call. 9 new tests, total 391 → 401.
 
 ## MIL-specific features
 
