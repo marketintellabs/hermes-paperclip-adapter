@@ -4,6 +4,17 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.9.4-mil.0] — 2026-05-03
+
+### Fixed
+- **Release-hygiene: `ADAPTER_VERSION` constant ↔ `package.json` version drift.** `src/shared/version.ts` exports the canonical runtime version constant that gets emitted in `result_json.adapterVersion` (every heartbeat run), the MCP server connection banner, and `runHealthCheck()` output. This constant was last touched in 0.9.1-mil.0 and accidentally **not bumped** in either 0.9.2-mil.0 (PR #32) or 0.9.3-mil.0 (PR #33). The published npm packages were correct, the deployed images were correct, the new behaviour (terminal-state guard + anti-hallucination prefixes) was live in production — but every run on the fleet was reporting `adapterVersion: "0.9.1-mil.0"` for ~12 hours, and `bake-spotcheck.mjs` / `check-pilot.mjs` would have flagged the entire fleet as on the old adapter forever. 0.9.4 bumps the constant.
+- **CI guard against a recurrence.** New `src/shared/version.test.ts` asserts `ADAPTER_VERSION === require('../package.json').version` and asserts the constant follows the `MAJOR.MINOR.PATCH-mil.N` prerelease shape. The release workflow now runs `npm test` before `npm publish`, so the test runs on every tag push. The version.ts docstring already claimed "the release workflow checks this at publish time" — that claim is now true.
+- **Release workflow tag-vs-package-json guard.** New step in `.github/workflows/release.yml` asserts the pushed tag (`v<x.y.z-mil.N>`) matches `package.json` before publishing. Prevents a hand-crafted tag from publishing a different version than the tag implies.
+
+### Notes
+- **Behaviour-only release; no runtime code change.** All the 0.9.2 and 0.9.3 features are already live in production from the 2026-05-03 18:37 UTC deploy — what was wrong was the self-reported version number, not the running code. Once 0.9.4 deploys, telemetry catches up to reality.
+- **Test count: 401 → 411** (8 net-new from 0.9.3's `types.test.ts` + `server.test.ts` already counted in the prior baseline; 0.9.4 adds 2 in `version.test.ts`).
+
 ## [0.9.3-mil.0] — 2026-05-03
 
 ### Fixed
@@ -19,13 +30,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 ### Fixed
 - **Terminal-state guard on `update_issue_status`.** The tool now reads the issue's current status before issuing the PATCH and refuses to transition out of `cancelled` or `done`. An idempotent re-assert (e.g. `done` → `done`) is allowed and short-circuits to the PATCH. The error result returns `retryPolicy=abort` with a clear message instructing the agent to look for new work via `list_my_issues`. If the precheck read itself fails the guard logs and falls through, so a transient backend hiccup never blocks a legitimate transition.
 - **9 new unit tests** in `update-issue-status.test.ts` covering the guard's positive and negative paths plus the precheck-read-failure fallthrough; existing `tools.test.ts` cases updated to stub the new GET.
-
-### Notes
-## [0.9.2-mil.0] — 2026-05-03
-
-### Fixed
-- **Terminal-state guard on `update_issue_status`.** The tool now reads the issue's current status before issuing the PATCH and refuses to transition out of `cancelled` or `done`. An idempotent re-assert (e.g. `done` → `done`) is allowed and short-circuits to the PATCH. The error result returns `retryPolicy=abort` with a clear message instructing the agent to look for new work via `list_my_issues`. If the precheck read itself fails the guard logs and falls through, so a transient backend hiccup never blocks a legitimate transition.
-- **9 new unit tests** in `update-issue-status.test.ts` covering the guard's positive and negative paths plus the precheck-read-failure fallthrough; existing `tools.test.ts` cases updated to stub the new GET. Total adapter test count: 391 → 401.
 
 ### Notes
 - **Defense-in-depth, not a behaviour change for healthy runs.** Normal transitions (`in_progress` → `done`, `in_progress` → `blocked`, `in_progress` → `needs_review`) cost one extra GET (~50–150ms once at run end) and behave identically.
