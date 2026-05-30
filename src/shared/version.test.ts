@@ -53,9 +53,9 @@ describe("ADAPTER_VERSION", () => {
       ADAPTER_VERSION,
       /^[0-9]+\.[0-9]+\.[0-9]+-mil\.[0-9]+$/,
       `ADAPTER_VERSION="${ADAPTER_VERSION}" must follow MAJOR.MINOR.PATCH-mil.N. ` +
-        `The release workflow publishes any prerelease under the "mil" dist-tag ` +
-        `(see .github/workflows/release.yml); a non-prerelease version would ` +
-        `accidentally land on @latest as a stable release.`,
+        `The release workflow publishes via OIDC trusted publishing straight to ` +
+        `the @latest dist-tag (see .github/workflows/release.yml); this fork has ` +
+        `no non-prerelease stream, so @latest is effectively MIL.`,
     );
   });
 });

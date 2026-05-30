@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  id-token: write
+  contents: write # create the GitHub Release on tag push
+  id-token: write # OIDC: required for npm trusted publishing AND provenance
 
 env:
   # Force JS-based GitHub Actions (actions/checkout@v5,
@@ -33,6 +33,14 @@ jobs:
         with:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
+      # Trusted publishing (OIDC) requires npm >= 11.5.1. Node 24's bundled
+      # npm can lag that, so pin a known-good npm before anything else. Also
+      # surfaces the version in the log for troubleshooting ENEEDAUTH issues.
+      - name: Ensure npm supports OIDC trusted publishing (>= 11.5.1)
+        run: |
+          npm install -g npm@latest
+          echo "npm $(npm -v) / node $(node -v)"
 
       - run: npm ci
 
@@ -70,25 +78,33 @@ jobs:
           fi
           echo "Tag v$TAG matches package.json version $PKG_VERSION"
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Publish to npm (OIDC trusted publishing)
         run: |
-          # MIL fork releases are all prereleases ("-mil.N" SemVer tag).
-          # npm requires an explicit dist-tag for prereleases so they
-          # can't land on `latest` by accident. We publish under `mil`
-          # AND then move `latest` forward because this fork has no
-          # non-prerelease stream — `latest` is effectively MIL, and
-          # the npmjs.com website renders the README of whatever
-          # `latest` points at.
-          VERSION="$(node -p "require('./package.json').version")"
-          PKG="$(node -p "require('./package.json').name")"
-          if [[ "$VERSION" == *-* ]]; then
-            npm publish --access public --provenance --tag mil
-            npm dist-tag add "${PKG}@${VERSION}" latest
-          else
-            npm publish --access public --provenance
-          fi
+          # Trusted publishing via OIDC — NO long-lived NPM_TOKEN. The npm CLI
+          # detects the GitHub Actions OIDC environment (granted by the
+          # `id-token: write` permission below) and exchanges it for a
+          # short-lived publish token. Requires:
+          #   1. npm >= 11.5.1 (ensured by the step above).
+          #   2. A Trusted Publisher configured on npmjs.com for this package:
+          #      GitHub Actions / org `marketintellabs` /
+          #      repo `hermes-paperclip-adapter` / workflow `release.yml` /
+          #      allowed action `npm publish`.
+          #   3. package.json `repository.url` matching the GitHub repo (it does).
+          #
+          # We publish STRAIGHT to the `latest` dist-tag. This fork has no
+          # non-prerelease stream, so `latest` is effectively MIL (npmjs.com
+          # renders the README of whatever `latest` points at). The old
+          # "publish to `mil`, then `npm dist-tag add ... latest`" two-step is
+          # NOT compatible with OIDC: only `npm publish` / `npm stage publish`
+          # are OIDC-authenticated — `npm dist-tag` still needs a long-lived
+          # token, which is exactly what we're eliminating. Consumers pin exact
+          # versions (paperclip/Dockerfile -> @x.y.z-mil.N), so the `mil` tag was
+          # never load-bearing for deploys.
+          #
+          # Provenance is generated automatically under OIDC from a public repo;
+          # `--provenance` is kept explicit so a misconfiguration fails loudly
+          # rather than silently dropping attestations.
+          npm publish --access public --provenance --tag latest
 
       # Create a GitHub Release on every tag push so the npmjs.com
       # "Version history" panel shows release notes (npm pulls them
