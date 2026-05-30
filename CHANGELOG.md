@@ -4,6 +4,19 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.9.6-mil.0] — 2026-05-30
+
+### Changed
+- **Free models are now pinned per-tier to fast, tool-calling slugs — no more `openrouter/free` meta-router.** The 0.9.5 default routed freed tiers through OpenRouter's `openrouter/free` meta-router, which selects a free model *at random* from the whole free pool. In practice that regularly landed on the slow NVIDIA Nemotron free endpoints (`nvidia/nemotron-3-nano-*`, `nvidia/nemotron-3-super-*`) — unacceptable response times for an agent that makes many sequential MCP tool calls per run. `src/server/openrouter-mode.ts` now maps each tier to a specific fast free model (`DEFAULT_FREE_MODELS_BY_TIER`), chosen for low latency (few-active-param MoE / "flash" / "low-latency" tiers) and verified live against OpenRouter's `?supported_parameters=tools` model list:
+  - `super` → `deepseek/deepseek-v4-flash:free` (13B-active flash MoE, 1M ctx, native tools)
+  - `nano` → `openai/gpt-oss-20b:free` (3.6B-active, "lower-latency", tools + structured outputs)
+  - `opus` → `qwen/qwen3-next-80b-a3b-instruct:free` (3B-active MoE, structured outputs)
+  - `quality` → `google/gemma-4-31b-it:free` (4B-active, native function calling)
+  - `glm` → `openai/gpt-oss-120b:free` (strongest free reasoning, native tools)
+- **The two high-volume freed tiers (`super`, `nano`) are deliberately on *different* models.** OpenRouter free rate limits are per-model (~200 req/day with no credits, 1000 with $10+), so co-locating every agent on one free slug would exhaust that model's daily cap and stall the fleet during testing. `hybrid` spreads across two models; `free_only` spreads all five tiers across five models.
+- **Per-tier runtime override added.** `OPENROUTER_FREE_MODEL_<TIER>` (e.g. `OPENROUTER_FREE_MODEL_SUPER`, `OPENROUTER_FREE_MODEL_NANO`) overrides a single tier; the existing global `OPENROUTER_FREE_MODEL` still pins all freed tiers. Resolution order: per-tier env → global env → per-tier default → `FALLBACK_FREE_MODEL` (`deepseek/deepseek-v4-flash:free`). All overrides are env-only (no rebuild).
+- `production` remains identity (no behaviour change at deploy). +9 net tests (`openrouter-mode.test.ts`: 22 → 31).
+
 ## [0.9.5-mil.0] — 2026-05-30
 
 ### Added

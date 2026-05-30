@@ -858,6 +858,24 @@ a planned fast-follow once detectability in the spawn path is
 confirmed). See [`src/server/openrouter-mode.ts`](./src/server/openrouter-mode.ts).
 +22 tests.
 
+**0.9.6-mil.0 — per-tier fast free models (drop the
+`openrouter/free` meta-router).** 0.9.5 routed freed tiers through
+OpenRouter's `openrouter/free` meta-router, which picks a free model
+*at random* and routinely landed on the slow NVIDIA Nemotron free
+endpoints — unacceptable latency for an agent making many sequential
+tool calls. Each tier now pins a specific fast, tool-calling free
+slug (`DEFAULT_FREE_MODELS_BY_TIER`): `super` →
+`deepseek/deepseek-v4-flash:free`, `nano` → `openai/gpt-oss-20b:free`,
+`opus` → `qwen/qwen3-next-80b-a3b-instruct:free`, `quality` →
+`google/gemma-4-31b-it:free`, `glm` → `openai/gpt-oss-120b:free`. The
+two high-volume freed tiers (`super`, `nano`) sit on *different*
+models on purpose — OpenRouter free rate limits are per-model, so
+co-locating the whole fleet on one slug would burn its daily cap and
+stall testing. New per-tier runtime override
+`OPENROUTER_FREE_MODEL_<TIER>` (e.g. `_SUPER`, `_NANO`) layered above
+the global `OPENROUTER_FREE_MODEL`. `production` stays identity. +9
+tests. See [`src/server/openrouter-mode.ts`](./src/server/openrouter-mode.ts).
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
