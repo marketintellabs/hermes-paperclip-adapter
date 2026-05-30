@@ -839,6 +839,25 @@ before publish. The version.ts docstring already claimed "the
 release workflow checks this at publish time" — that claim is
 now true.
 
+**0.9.5-mil.0 — `OPENROUTER_MODE` model toggle (production |
+hybrid | free_only).** Generalises the binary test-mode override
+into a process-wide, env-controlled mode that maps each agent's
+*tier* (`adapterConfig.modelTier`) to a model. `production`
+(default) is identity — deploying changes nothing until an operator
+flips the env var and redeploys. `hybrid` keeps the reasoning/
+writing tiers paid (`opus`, `quality`, `glm`) and routes the
+high-volume worker tiers (`super`, `nano`) to a free model;
+`free_only` frees every tier. The free model defaults to
+`openrouter/free` and is overridable AT RUNTIME via
+`OPENROUTER_FREE_MODEL` (no rebuild). Precedence: test-mode wins
+over the mode toggle, which wins over the configured paid model, so
+smoketest routing is never disturbed. Each overridden spawn logs a
+grep-able `*** OPENROUTER_MODE=… ***` banner with the tier and the
+original→effective model. No auto-fallback yet (a 429→paid retry is
+a planned fast-follow once detectability in the spawn path is
+confirmed). See [`src/server/openrouter-mode.ts`](./src/server/openrouter-mode.ts).
++22 tests.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
