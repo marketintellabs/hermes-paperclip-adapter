@@ -43,11 +43,46 @@ const VALID_MODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Default free model. `openrouter/free` is OpenRouter's meta-router over the
- * free tool-calling pool — robust to any single free model being deprecated
- * or saturated. Override per-deploy with `OPENROUTER_FREE_MODEL`.
+ * Per-tier default free models.
+ *
+ * We deliberately DO NOT use the `openrouter/free` meta-router: it picks a free
+ * model at random from the whole free pool, which regularly lands on the slow
+ * NVIDIA Nemotron free endpoints (`nvidia/nemotron-3-nano-*`,
+ * `nvidia/nemotron-3-super-*`) — unacceptable response times for an agent that
+ * makes many sequential tool calls per run. Instead each tier is pinned to a
+ * specific fast, tool-calling free model, chosen for low latency (few-active-
+ * param MoE / "flash" / "low-latency" tiers) and verified live on OpenRouter:
+ *
+ *   super   deepseek/deepseek-v4-flash:free           flash MoE (13B active), 1M ctx, native tools
+ *   nano    openai/gpt-oss-20b:free                   3.6B active, "lower-latency", tools+structured
+ *   opus    qwen/qwen3-next-80b-a3b:free instruct     3B active MoE, structured outputs
+ *   quality google/gemma-4-31b-it:free                4B active, native function calling
+ *   glm     openai/gpt-oss-120b:free                  strongest free reasoning, native tools
+ *
+ * Splitting the two high-volume freed tiers (super, nano) onto DIFFERENT models
+ * matters: OpenRouter free rate limits are per-model, so co-locating every
+ * agent on one free slug would exhaust that model's daily cap and stall the
+ * fleet. free_only spreads all five tiers across five models for the same
+ * reason.
+ *
+ * Every default is overridable AT RUNTIME (no rebuild):
+ *   - OPENROUTER_FREE_MODEL              global override — pins ALL freed tiers
+ *   - OPENROUTER_FREE_MODEL_<TIER>       per-tier override (e.g. _SUPER, _NANO)
+ * Per-tier wins over global, which wins over these defaults.
  */
-export const DEFAULT_FREE_MODEL = "openrouter/free";
+export const DEFAULT_FREE_MODELS_BY_TIER: Record<string, string> = {
+  opus: "qwen/qwen3-next-80b-a3b-instruct:free",
+  quality: "google/gemma-4-31b-it:free",
+  glm: "openai/gpt-oss-120b:free",
+  super: "deepseek/deepseek-v4-flash:free",
+  nano: "openai/gpt-oss-20b:free",
+};
+
+/**
+ * Fallback free model for a freed tier with no specific default (e.g. an
+ * unknown tier in free_only). The fastest broadly-capable free slug.
+ */
+export const FALLBACK_FREE_MODEL = "deepseek/deepseek-v4-flash:free";
 
 /** Provider for the free model. Every free model worth using is on OpenRouter. */
 export const FREE_PROVIDER = "openrouter";
@@ -101,8 +136,28 @@ export function resolveOpenRouterMode(
   return parseOpenRouterMode(env.OPENROUTER_MODE).mode;
 }
 
-export function resolveFreeModel(env: NodeJS.ProcessEnv = process.env): string {
-  return (env.OPENROUTER_FREE_MODEL || DEFAULT_FREE_MODEL).trim();
+/**
+ * Resolve the free model for a given tier. Resolution order:
+ *   1. OPENROUTER_FREE_MODEL_<TIER>  (per-tier runtime override)
+ *   2. OPENROUTER_FREE_MODEL         (global runtime override — pins all tiers)
+ *   3. DEFAULT_FREE_MODELS_BY_TIER[tier]
+ *   4. FALLBACK_FREE_MODEL           (unknown tier)
+ * All overrides are runtime-only (env), so an operator can retarget a slow or
+ * rate-limited free model without rebuilding the adapter.
+ */
+export function resolveFreeModel(
+  env: NodeJS.ProcessEnv = process.env,
+  tier?: string | null,
+): string {
+  const t = (tier ?? "").trim().toLowerCase();
+  if (t) {
+    const perTier = env[`OPENROUTER_FREE_MODEL_${t.toUpperCase()}`];
+    if (perTier && perTier.trim()) return perTier.trim();
+  }
+  if (env.OPENROUTER_FREE_MODEL && env.OPENROUTER_FREE_MODEL.trim()) {
+    return env.OPENROUTER_FREE_MODEL.trim();
+  }
+  return (t && DEFAULT_FREE_MODELS_BY_TIER[t]) || FALLBACK_FREE_MODEL;
 }
 
 export interface ModelModeResolution {
@@ -171,7 +226,7 @@ export function resolveModelMode(args: {
     };
   }
 
-  const freeModel = resolveFreeModel(env);
+  const freeModel = resolveFreeModel(env, tier);
   const auxiliary: Record<string, Record<string, unknown>> = {};
   for (const slot of AUXILIARY_SLOTS) {
     auxiliary[slot] = { model: freeModel, provider: FREE_PROVIDER };
