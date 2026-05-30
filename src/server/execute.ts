@@ -73,6 +73,11 @@ import {
   formatTestModeBanner,
   type TestModeConfig,
 } from "./test-mode.js";
+import {
+  resolveModelMode,
+  formatModeBanner,
+  type ModelModeResolution,
+} from "./openrouter-mode.js";
 
 import { validateAgentSkills, resolveSkillPath } from "./validate-skills.js";
 import { planSoftTimeout, formatSoftTimeoutWarning } from "./soft-timeout.js";
@@ -1327,14 +1332,63 @@ export async function execute(
     title: run.taskTitle,
     body: run.taskBody,
   });
-  const model = testMode.active ? testMode.model : configuredModel;
-  const resolvedProvider = testMode.active ? testMode.provider : configuredResolvedProvider;
-  const explicitProvider = testMode.active ? testMode.provider : configuredProvider;
+
+  // ── OpenRouter mode policy (env-controlled, tier-based) ────────────────
+  // Generalises test mode into production | hybrid | free_only. Test mode
+  // WINS over this (an active smoketest must never be re-routed by the mode
+  // toggle), so we only apply the mode override when test mode is inactive.
+  // The agent's tier comes from `adapterConfig.modelTier` (set by
+  // paperclip/configure-agents.mjs); a missing tier stays paid in hybrid.
+  // See `src/server/openrouter-mode.ts` for the full contract.
+  const modeResolution: ModelModeResolution = resolveModelMode({
+    tier: cfgString(config.modelTier),
+    configuredModel,
+    configuredProvider: configuredResolvedProvider,
+  });
+  const modeActive = !testMode.active && modeResolution.overridden;
+  if (!modeResolution.recognized) {
+    await ctx.onLog(
+      "stderr",
+      `[hermes] WARN: OPENROUTER_MODE="${process.env.OPENROUTER_MODE}" is not one of ` +
+        `production|hybrid|free_only — defaulting to production (no override).\n`,
+    );
+  }
+
+  const model = testMode.active
+    ? testMode.model
+    : modeActive
+      ? modeResolution.model
+      : configuredModel;
+  const resolvedProvider = testMode.active
+    ? testMode.provider
+    : modeActive
+      ? modeResolution.provider
+      : configuredResolvedProvider;
+  const explicitProvider = testMode.active
+    ? testMode.provider
+    : modeActive
+      ? modeResolution.provider
+      : configuredProvider;
+  const providerSource = testMode.active
+    ? "test-mode-override"
+    : modeActive
+      ? `openrouter-mode:${modeResolution.mode}`
+      : resolvedFrom;
   if (testMode.active) {
     await ctx.onLog(
       "stdout",
       formatTestModeBanner({
         cfg: testMode,
+        originalModel: configuredModel,
+        originalProvider: configuredProvider || configuredResolvedProvider || "",
+        agentName: ctx.agent?.name ?? null,
+      }),
+    );
+  } else if (modeActive) {
+    await ctx.onLog(
+      "stdout",
+      formatModeBanner({
+        res: modeResolution,
         originalModel: configuredModel,
         originalProvider: configuredProvider || configuredResolvedProvider || "",
         agentName: ctx.agent?.name ?? null,
@@ -1480,7 +1534,7 @@ export async function execute(
   // ── Log start ──────────────────────────────────────────────────────────
   await ctx.onLog(
     "stdout",
-    `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${testMode.active ? "test-mode-override" : resolvedFrom}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
+    `[hermes] Starting Hermes Agent (model=${model}, provider=${resolvedProvider} [${providerSource}], timeout=${timeoutSec}s${maxTurns ? `, max_turns=${maxTurns}` : ""})\n`,
   );
   if (resume.sessionId) {
     await ctx.onLog(
@@ -1767,7 +1821,9 @@ export async function execute(
     // is truly $0/run regardless of what the agent's adapterConfig says.
     const auxiliaryModels = testMode.active
       ? testMode.auxiliary
-      : cfgAuxiliaryModels(config.auxiliaryModels);
+      : modeActive
+        ? modeResolution.auxiliary
+        : cfgAuxiliaryModels(config.auxiliaryModels);
 
     perRunHome = await buildPerRunHermesHome(ctx.runId || "no-run-id", {
       apiUrl: paperclipClient.base,
@@ -2092,7 +2148,7 @@ export async function execute(
     adapterVersion: ADAPTER_VERSION,
     modelUsed: model,
     provider: resolvedProvider,
-    providerSource: testMode.active ? "test-mode-override" : resolvedFrom,
+    providerSource,
     result: cleanedResponse,
     session_id: parsed.sessionId || null,
     usage: parsed.usage || null,

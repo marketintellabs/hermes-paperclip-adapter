@@ -4,6 +4,19 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.9.5-mil.0] — 2026-05-30
+
+### Added
+- **`OPENROUTER_MODE` model toggle — `production | hybrid | free_only`.** New `src/server/openrouter-mode.ts` generalises the binary `test-mode.ts` override into a process-wide, env-controlled mode that maps each agent's *tier* to a model. The tier is read from `adapterConfig.modelTier` (set by `paperclip/configure-agents.mjs`).
+  - `production` (default) — identity; every agent runs its configured paid model. **Deploying this release is a no-op until an operator sets `OPENROUTER_MODE` and redeploys.**
+  - `hybrid` — keep `opus`/`quality`/`glm` paid; route the high-volume `super` + `nano` worker tiers to the free model. A missing/unknown tier stays **paid** (fail-safe: never silently downgrade a reasoning agent).
+  - `free_only` — every tier routes to the free model (dev/full-system validation only).
+  - **Free model** defaults to OpenRouter's `openrouter/free` meta-router and is overridable **at runtime** via `OPENROUTER_FREE_MODEL` (set on the ECS task definition — no adapter rebuild needed) to pin a specific free slug or alternative meta-router.
+  - **Precedence:** test-mode (env big-hammer / per-issue marker) wins over `OPENROUTER_MODE`, which wins over the configured paid model — smoketest routing is never disturbed.
+  - **Observability:** each overridden spawn logs a grep-able `[hermes] *** OPENROUTER_MODE=<mode> *** … tier=… model=<orig>-><free> …` banner; `result_json.providerSource` records `openrouter-mode:<mode>`; the "Starting Hermes Agent" line carries the same source tag. An unrecognised `OPENROUTER_MODE` value logs a WARN and falls back to production.
+  - When a tier is freed, all auxiliary slots (compression / vision / session_search / title_generation) are forced to the free model too, matching test-mode behaviour.
+  - **No auto-fallback yet.** A `429 → paid` retry in `hybrid` is a planned fast-follow, gated on confirming the 429 is detectable in the spawn path (Hermes runs `-Q` quiet). +22 tests (`src/server/openrouter-mode.test.ts`).
+
 ## [0.9.4-mil.0] — 2026-05-03
 
 ### Fixed
