@@ -876,6 +876,21 @@ stall testing. New per-tier runtime override
 the global `OPENROUTER_FREE_MODEL`. `production` stays identity. +9
 tests. See [`src/server/openrouter-mode.ts`](./src/server/openrouter-mode.ts).
 
+**0.9.7-mil.0 — re-baseline free-model defaults from a live smoke
+test (availability, not spec).** 0.9.6 picked free slugs from specs;
+a live tool-call smoke test
+([`tmp/free-model-smoketest.py`](https://github.com/marketintellabs/marketintellabs))
+showed the "fast" popular slugs (deepseek-v4-flash, qwen3-next,
+gemma-4) are **always 429'd upstream** — fast on paper, unavailable
+in practice. The only free models that were reliably available AND
+reliably emitted tool calls were OpenAI `gpt-oss` + `z-ai/glm-4.5-air`.
+New defaults: `super` → `openai/gpt-oss-120b:free` (8/8 avail, med
+3.2s), `nano` → `openai/gpt-oss-20b:free` (fastest, 2.6s), `opus`/
+`quality` → `z-ai/glm-4.5-air:free`, `glm` + fallback →
+`openai/gpt-oss-120b:free`. Confirmed the prod culprit:
+`nvidia/nemotron-nano-9b-v2:free` measured ~12s and emitted **zero**
+tool calls. No API change.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:
