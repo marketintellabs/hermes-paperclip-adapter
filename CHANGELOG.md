@@ -4,6 +4,18 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.9.7-mil.0] — 2026-05-30
+
+### Changed
+- **Per-tier free-model defaults re-baselined from a live smoke test — picked for AVAILABILITY, not just spec'd latency.** 0.9.6 picked free slugs from model specs (deepseek-v4-flash / qwen3-next / gemma-4). A live tool-call smoke test against OpenRouter's free tier (`tmp/free-model-smoketest.py`, 2026-05-30) showed those "fast" models are essentially **always 429'd upstream** (the popular free slugs are globally saturated) — fast on paper, unavailable in practice. The test scored models on availability + tool-call success + latency over repeated trials. The only free models that were *reliably available AND reliably emitted tool calls* were the OpenAI `gpt-oss` family and `z-ai/glm-4.5-air`. New defaults:
+  - `super` → `openai/gpt-oss-120b:free` (8/8 available, 8/8 tool calls, med 3.2s, p90 6.3s — most reliable)
+  - `nano` → `openai/gpt-oss-20b:free` (fastest median 2.6s, light, high-volume aux)
+  - `opus`, `quality` → `z-ai/glm-4.5-air:free` (8/8 available, med 5.4s)
+  - `glm` → `openai/gpt-oss-120b:free`
+  - `FALLBACK_FREE_MODEL` → `openai/gpt-oss-120b:free`
+- **Confirmed the NVIDIA failure mode that motivated all this.** `nvidia/nemotron-nano-9b-v2:free` measured ~12s/run and emitted **zero** tool calls across trials — exactly the prod symptom. (Notably the *larger* nemotrons, `3-nano-30b` / `3-super-120b`, were fine; the meta-router's problem was landing on the small one at random.)
+- **No API/contract change** — only the slug constants moved. `super` and `nano` still resolve to different slugs (rate-limit spread); all override precedence and `production`-is-identity behaviour unchanged.
+
 ## [0.9.6-mil.0] — 2026-05-30
 
 ### Changed

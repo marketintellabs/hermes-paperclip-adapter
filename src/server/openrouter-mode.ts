@@ -47,23 +47,34 @@ const VALID_MODES: ReadonlySet<string> = new Set([
  *
  * We deliberately DO NOT use the `openrouter/free` meta-router: it picks a free
  * model at random from the whole free pool, which regularly lands on the slow
- * NVIDIA Nemotron free endpoints (`nvidia/nemotron-3-nano-*`,
- * `nvidia/nemotron-3-super-*`) — unacceptable response times for an agent that
- * makes many sequential tool calls per run. Instead each tier is pinned to a
- * specific fast, tool-calling free model, chosen for low latency (few-active-
- * param MoE / "flash" / "low-latency" tiers) and verified live on OpenRouter:
+ * NVIDIA Nemotron free endpoints — `nvidia/nemotron-nano-9b-v2:free` in
+ * particular measured ~12s/run AND failed to emit any tool call across repeated
+ * trials, which is the observed prod failure mode for an agent that makes many
+ * sequential tool calls per run.
  *
- *   super   deepseek/deepseek-v4-flash:free           flash MoE (13B active), 1M ctx, native tools
- *   nano    openai/gpt-oss-20b:free                   3.6B active, "lower-latency", tools+structured
- *   opus    qwen/qwen3-next-80b-a3b:free instruct     3B active MoE, structured outputs
- *   quality google/gemma-4-31b-it:free                4B active, native function calling
- *   glm     openai/gpt-oss-120b:free                  strongest free reasoning, native tools
+ * These slugs are chosen from a LIVE smoke test (OpenRouter free tier, tool-call
+ * path, 2026-05-30) that scored models on what actually matters for the fleet:
+ * AVAILABILITY (free models are heavily rate-limited UPSTREAM — the popular fast
+ * ones like deepseek-v4-flash / qwen3-next / gemma-4 returned HTTP 429 on
+ * essentially every call), TOOL-CALL SUCCESS, and LATENCY. The only free models
+ * that were both reliably available AND reliably emitted tool calls were the
+ * OpenAI gpt-oss family and z-ai/glm-4.5-air:
  *
- * Splitting the two high-volume freed tiers (super, nano) onto DIFFERENT models
- * matters: OpenRouter free rate limits are per-model, so co-locating every
- * agent on one free slug would exhaust that model's daily cap and stall the
- * fleet. free_only spreads all five tiers across five models for the same
- * reason.
+ *   super   openai/gpt-oss-120b:free     8/8 avail, 8/8 tool, med 3.2s, p90 6.3s — most reliable
+ *   nano    openai/gpt-oss-20b:free      6/8 avail, fastest median 2.6s — light, high-volume aux
+ *   opus    z-ai/glm-4.5-air:free        8/8 avail, 8/8 tool, med 5.4s
+ *   quality z-ai/glm-4.5-air:free        (free_only only)
+ *   glm     openai/gpt-oss-120b:free     (free_only only)
+ *
+ * The two high-volume freed tiers (super, nano) sit on DIFFERENT slugs so they
+ * don't share one model's per-model rate-limit bucket. free_only spreads all
+ * tiers across three reliable slugs (gpt-oss-120b / gpt-oss-20b / glm-4.5-air);
+ * the reliably-available free pool is small, so three is the realistic spread.
+ *
+ * NOTE: the genuinely faster free models exist but are globally 429'd upstream
+ * regardless of our account — credits raise OUR per-account cap (50->1000/day)
+ * but do not fix upstream saturation. Re-run tmp/free-model-smoketest.py to
+ * re-baseline if the free landscape shifts, and retarget via the env overrides.
  *
  * Every default is overridable AT RUNTIME (no rebuild):
  *   - OPENROUTER_FREE_MODEL              global override — pins ALL freed tiers
@@ -71,18 +82,19 @@ const VALID_MODES: ReadonlySet<string> = new Set([
  * Per-tier wins over global, which wins over these defaults.
  */
 export const DEFAULT_FREE_MODELS_BY_TIER: Record<string, string> = {
-  opus: "qwen/qwen3-next-80b-a3b-instruct:free",
-  quality: "google/gemma-4-31b-it:free",
+  opus: "z-ai/glm-4.5-air:free",
+  quality: "z-ai/glm-4.5-air:free",
   glm: "openai/gpt-oss-120b:free",
-  super: "deepseek/deepseek-v4-flash:free",
+  super: "openai/gpt-oss-120b:free",
   nano: "openai/gpt-oss-20b:free",
 };
 
 /**
  * Fallback free model for a freed tier with no specific default (e.g. an
- * unknown tier in free_only). The fastest broadly-capable free slug.
+ * unknown tier in free_only). The most reliable free slug measured: gpt-oss-120b
+ * was 8/8 available with 8/8 tool calls.
  */
-export const FALLBACK_FREE_MODEL = "deepseek/deepseek-v4-flash:free";
+export const FALLBACK_FREE_MODEL = "openai/gpt-oss-120b:free";
 
 /** Provider for the free model. Every free model worth using is on OpenRouter. */
 export const FREE_PROVIDER = "openrouter";
