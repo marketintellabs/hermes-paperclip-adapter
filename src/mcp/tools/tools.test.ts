@@ -333,7 +333,10 @@ describe("create_sub_issue", () => {
     const body = calls[0].body as Record<string, unknown>;
     assert.equal(body.title, "Delegated task");
     assert.equal(body.assigneeAgentId, "ag-other");
-    assert.equal(body.priority, 2);
+    // priority is coerced to the Paperclip enum before it hits the wire:
+    // the legacy 0..4 scale maps 2 → "high" (see priority.ts / F6). The
+    // API rejects raw integers with HTTP 400.
+    assert.equal(body.priority, "high");
     // CONTRACT: Paperclip's `POST /companies/:id/issues` body uses the
     // column-aligned name `parentId` (NOT `parentIssueId`, which is
     // only the LLM-facing tool input field). MAR-204/206/207

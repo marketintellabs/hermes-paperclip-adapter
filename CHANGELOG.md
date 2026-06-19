@@ -4,6 +4,14 @@ All notable changes to the `@marketintellabs/hermes-paperclip-adapter` fork are 
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [SemVer](https://semver.org/) with the `-mil.N` prerelease suffix marking MIL fork releases.
 
+## [0.9.8-mil.0] — 2026-06-19
+
+### Fixed
+- **`create_sub_issue` / `create_sub_issues` priority no longer triggers a fix-args retry loop (F6).** The MCP input schema declared `priority` as `z.number().int().min(0).max(4)` and forwarded the integer verbatim to the Paperclip Issues API. That was wrong in *both* directions: the API validates `priority` as a string enum and rejects integers with HTTP 400 (`Expected 'critical' | 'high' | 'medium' | 'low', received number`), while an LLM that instead passed the enum string was rejected by the MCP SDK's pre-execute schema validation. Either path surfaced to the model as `fix-args` with no actionable detail, so it cycled through values and burned its tool-call budget — the chronic delegation failure that walked the Daily Research Pipeline into the 600s timeout.
+  - New `src/mcp/tools/priority.ts`: a permissive `prioritySchema` (`string | number`, optional) that the SDK can **never reject** on a type mismatch, plus `coercePriority()` which normalises any input to the API enum or `undefined`. Accepts the enum strings, common synonyms (`urgent`/`p0` → `critical`, `med`/`normal` → `medium`), and the legacy `0..4` integer scale (`0` → omit, `1` → `critical`, `2` → `high`, `3` → `medium`, `4` → `low`). Unknown / out-of-range / wrong-type values are dropped (the board defaults new issues to `medium`), never rejected.
+  - Both delegation tools now coerce in `execute` and send the enum string on the wire. The skill-level workaround (`omit priority`) in the consuming repo can be relaxed once this ships, but remains harmless.
+  - +17 tests (`src/mcp/tools/priority.test.ts`) covering the coercion table and proving the reconstructed tool input objects parse every priority shape (string/number/synonym/garbage/omitted) without rejecting. Existing payload-contract tests updated to assert the coerced enum (`2` → `"high"`).
+
 ## [0.9.7-mil.0] — 2026-05-30
 
 ### Changed

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PaperclipClientError } from "../client.js";
+import { coercePriority, prioritySchema } from "./priority.js";
 import {
   classifyHttp,
   errorResult,
@@ -22,13 +23,7 @@ const inputSchema = {
     .describe(
       "REQUIRED. The parent issue this sub-task is a child of. Agents cannot create top-level (un-parented) work via MCP — that comes from the board via Routines or manual assignment. On adapter-assigned runs parentIssueId MUST equal the issue you're currently working on.",
     ),
-  priority: z
-    .number()
-    .int()
-    .min(0)
-    .max(4)
-    .optional()
-    .describe("0 = no priority, 1 = urgent, 2 = high, 3 = medium, 4 = low."),
+  priority: prioritySchema,
 };
 
 /**
@@ -140,7 +135,12 @@ export const createSubIssueTool: ToolDef<typeof inputSchema> = {
         parentId: parentIssueId,
         status: "todo",
       };
-      if (priority !== undefined) payload.priority = priority;
+      // Normalise to the Paperclip enum ("critical"|"high"|"medium"|"low")
+      // or omit. The schema accepts string|number and never rejects, so
+      // the coercion — not validation — is what guarantees a valid wire
+      // value (see priority.ts / F6).
+      const coercedPriority = coercePriority(priority);
+      if (coercedPriority !== undefined) payload.priority = coercedPriority;
 
       const created = await client.post<unknown>(
         `/companies/${companyId}/issues`,
