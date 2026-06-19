@@ -891,6 +891,22 @@ New defaults: `super` → `openai/gpt-oss-120b:free` (8/8 avail, med
 `nvidia/nemotron-nano-9b-v2:free` measured ~12s and emitted **zero**
 tool calls. No API change.
 
+**0.9.8-mil.0 — fix the `create_sub_issue(s)` priority retry-loop
+(F6).** The `priority` field declared `z.number().int().min(0).max(4)`
+and forwarded the integer verbatim, but the Paperclip Issues API
+validates priority as a string enum and rejects integers with HTTP 400
+(`Expected 'critical' | 'high' | 'medium' | 'low', received number`).
+The reverse also failed: an LLM that passed the enum string was rejected
+by the MCP SDK's pre-execute schema validation. Either way the model saw
+an unactionable `fix-args` and burned its tool-call budget retrying — the
+chronic delegation failure that timed out the Daily Research Pipeline.
+New [`src/mcp/tools/priority.ts`](./src/mcp/tools/priority.ts): a
+permissive `prioritySchema` (`string | number`, optional) the SDK can
+never reject, plus `coercePriority()` that maps any input (enum strings,
+synonyms like `urgent`→`critical`, the legacy `0..4` scale) to the API
+enum or drops it. Both tools coerce in `execute` and send the enum on the
+wire. +17 tests.
+
 ## MIL-specific features
 
 Features you get in this fork that upstream doesn't ship:

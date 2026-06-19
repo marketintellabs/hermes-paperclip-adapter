@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { PaperclipClientError } from "../client.js";
+import { coercePriority, prioritySchema } from "./priority.js";
 import {
   classifyHttp,
   errorResult,
@@ -43,13 +44,7 @@ const subIssueSpec = z.object({
   assigneeAgentId: z
     .string()
     .describe("UUID of the agent to assign this sub-issue to. Required — don't create unassigned work."),
-  priority: z
-    .number()
-    .int()
-    .min(0)
-    .max(4)
-    .optional()
-    .describe("0 = no priority, 1 = urgent, 2 = high, 3 = medium, 4 = low."),
+  priority: prioritySchema,
 });
 
 const inputSchema = {
@@ -109,7 +104,10 @@ function buildPayload(
     parentId: parentIssueId,
     status: "todo",
   };
-  if (spec.priority !== undefined) payload.priority = spec.priority;
+  // Normalise to the Paperclip enum or omit — same contract as the
+  // singular tool (see priority.ts / F6).
+  const coercedPriority = coercePriority(spec.priority);
+  if (coercedPriority !== undefined) payload.priority = coercedPriority;
   return payload;
 }
 

@@ -135,10 +135,12 @@ describe("create_sub_issues", () => {
       assert.equal(body.assigneeAgentId, "ag-other");
     }
 
-    // Priority is preserved per-item (only specified on the second).
+    // Priority is coerced to the Paperclip enum per-item (only specified
+    // on the second). The legacy 0..4 scale maps 2 → "high"; the API
+    // rejects raw integers with HTTP 400 (see priority.ts / F6).
     const bodies = calls.map((c) => c.body as Record<string, unknown>);
     assert.equal(bodies[0].priority, undefined);
-    assert.equal(bodies[1].priority, 2);
+    assert.equal(bodies[1].priority, "high");
     assert.equal(bodies[2].priority, undefined);
 
     // Result envelope shape — succeeded count, durationMs, per-item
