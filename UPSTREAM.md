@@ -1,5 +1,11 @@
 # Upstream sync
 
+> **End of maintenance (July 2026):** MarketIntelLabs no longer supports or
+> maintains this fork, and no further upstream syncs will happen. MIL built
+> its own orchestrator, [Cadre](https://github.com/marketintellabs/cadre),
+> which runs Hermes Agent directly with full support — no Paperclip, no
+> adapter. The sync policy below is retained as historical record.
+
 This repository is a MarketIntelLabs fork of
 [`NousResearch/hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter),
 published to npm as

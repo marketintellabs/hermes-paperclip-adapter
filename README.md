@@ -1,16 +1,33 @@
 # @marketintellabs/hermes-paperclip-adapter
 
-> **Actively maintained by [MarketIntelLabs](https://marketintellabs.com).** This
-> package is a [MarketIntelLabs](https://marketintellabs.com) fork of the
-> upstream [`hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter)
-> by [Nous Research](https://nousresearch.com), published to npm as
-> [`@marketintellabs/hermes-paperclip-adapter`](https://www.npmjs.com/package/@marketintellabs/hermes-paperclip-adapter).
+> ## ⚠️ End of maintenance — no longer supported
 >
-> All production deploys at MarketIntelLabs consume this fork. Upstream credit
-> for the core adapter design goes to Nous Research; all fork-specific
-> behaviours (listed under [MIL-specific features](#mil-specific-features)
-> below) are maintained here. See [`UPSTREAM.md`](./UPSTREAM.md) for the fork
-> point, divergence list, and sync policy.
+> **As of July 2026, [MarketIntelLabs](https://marketintellabs.com) is no
+> longer supporting or maintaining this fork.** No further releases, bug
+> fixes, security patches, or issue/PR triage will happen here.
+>
+> MarketIntelLabs migrated off Paperclip and built its own orchestrator,
+> **[Cadre](https://github.com/marketintellabs/cadre)** — a lightweight
+> multi-agent company control plane with **full, first-class support for
+> [Hermes Agent](https://github.com/NousResearch/hermes-agent)** (the runtime
+> this adapter wrapped). Cadre runs Hermes directly — companies, departments,
+> personas, routines, tasks, handoffs, and budgets — with no Paperclip and no
+> adapter layer. If you were using this fork to run Hermes agents as managed
+> employees, Cadre is the successor.
+>
+> The npm package
+> [`@marketintellabs/hermes-paperclip-adapter`](https://www.npmjs.com/package/@marketintellabs/hermes-paperclip-adapter)
+> remains published (final release: `0.9.8-mil.0`) for anyone pinned to it,
+> but it is frozen as-is. For a maintained Paperclip adapter, use the upstream
+> [`hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter)
+> by [Nous Research](https://nousresearch.com).
+
+This package is a MarketIntelLabs fork of the upstream
+[`hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter)
+by [Nous Research](https://nousresearch.com). Upstream credit for the core
+adapter design goes to Nous Research; the fork-specific behaviours are listed
+under [MIL-specific features](#mil-specific-features) below. See
+[`UPSTREAM.md`](./UPSTREAM.md) for the fork point and divergence list.
 
 A [Paperclip](https://paperclip.ing) adapter that lets you run [Hermes Agent](https://github.com/NousResearch/hermes-agent) as a managed employee in a Paperclip company.
 
