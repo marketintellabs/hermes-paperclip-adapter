@@ -2,9 +2,11 @@
 
 > **End of maintenance (July 2026):** MarketIntelLabs no longer supports or
 > maintains this fork, and no further upstream syncs will happen. MIL built
-> its own orchestrator, [Cadre](https://github.com/marketintellabs/cadre),
-> which runs Hermes Agent directly with full support — no Paperclip, no
-> adapter. The sync policy below is retained as historical record.
+> its own private orchestrator, Cadre, which runs Hermes Agent directly with
+> full support — no Paperclip, no adapter. **Cadre is not public:** it is an
+> internal MarketIntelLabs system, not open source, and not available for
+> external consumption, adoption, or use. The sync policy below is retained as
+> historical record.
 
 This repository is a MarketIntelLabs fork of
 [`NousResearch/hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter),
