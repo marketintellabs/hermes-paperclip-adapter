@@ -6,19 +6,22 @@
 > longer supporting or maintaining this fork.** No further releases, bug
 > fixes, security patches, or issue/PR triage will happen here.
 >
-> MarketIntelLabs migrated off Paperclip and built its own orchestrator,
-> **[Cadre](https://github.com/marketintellabs/cadre)** — a lightweight
-> multi-agent company control plane with **full, first-class support for
-> [Hermes Agent](https://github.com/NousResearch/hermes-agent)** (the runtime
-> this adapter wrapped). Cadre runs Hermes directly — companies, departments,
-> personas, routines, tasks, handoffs, and budgets — with no Paperclip and no
-> adapter layer. If you were using this fork to run Hermes agents as managed
-> employees, Cadre is the successor.
+> MarketIntelLabs migrated off Paperclip and built its own private orchestrator,
+> **Cadre** — an internal multi-agent company control plane with full,
+> first-class support for [Hermes Agent](https://github.com/NousResearch/hermes-agent)
+> (the runtime this adapter wrapped). Cadre runs Hermes directly, with no
+> Paperclip and no adapter layer.
+>
+> **Cadre is not public.** It is a private, internal MarketIntelLabs system —
+> not open source, not distributed, and not available for external consumption,
+> adoption, or use. MarketIntelLabs does not offer Cadre as a product or
+> replacement for this fork.
 >
 > The npm package
 > [`@marketintellabs/hermes-paperclip-adapter`](https://www.npmjs.com/package/@marketintellabs/hermes-paperclip-adapter)
 > remains published (final release: `0.9.8-mil.0`) for anyone pinned to it,
-> but it is frozen as-is. For a maintained Paperclip adapter, use the upstream
+> but it is frozen as-is. If you need a maintained Paperclip adapter for
+> Hermes, use the upstream
 > [`hermes-paperclip-adapter`](https://github.com/NousResearch/hermes-paperclip-adapter)
 > by [Nous Research](https://nousresearch.com).
 
